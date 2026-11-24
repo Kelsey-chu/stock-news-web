@@ -115,9 +115,7 @@ def get_stock_price(symbol):
         return {"symbol": symbol, "error": str(e)}
 
 def get_company_info(symbol):
-    """取得公司基本面（資料最終來自公司向監管機構申報的正式財報）
-    加強：多欄位備援、港股相容、失敗時回傳錯誤訊息
-    """
+    """以正式財報為核心：抓取多季營收/淨利並做簡單對比分析"""
     is_hk = symbol.endswith(".HK")
     if is_hk:
         official_url = "https://www.hkexnews.hk/search/titlesearch.xhtml?lang=zh"
@@ -128,134 +126,142 @@ def get_company_info(symbol):
 
     result = {
         "longName": symbol,
-        "sector": None,
-        "industry": None,
-        "marketCap": None,
-        "revenue": None,
-        "revenueGrowth": None,
-        "grossMargins": None,
-        "profitMargins": None,
-        "trailingPE": None,
-        "forwardPE": None,
-        "eps": None,
-        "dividendYield": None,
-        "fiftyTwoWeekHigh": None,
-        "fiftyTwoWeekLow": None,
-        "recommendation": None,
-        "targetMeanPrice": None,
         "currency": "HKD" if is_hk else "USD",
-        "quarterly": [],
         "official_url": official_url,
         "official_label": official_label,
         "website": None,
+        "quarterly": [],
+        "annual": [],
+        "analysis_text": [],
         "error": None
     }
 
     try:
         ticker = yf.Ticker(symbol)
 
-        # 方法1：info
-        info = {}
+        # 名稱
         try:
             info = ticker.info or {}
-        except Exception as e:
-            logger.warning(f"info 失敗 {symbol}: {e}")
+            result["longName"] = info.get("longName") or info.get("shortName") or symbol
+            result["website"] = info.get("website")
+            result["currency"] = info.get("currency") or result["currency"]
+        except Exception:
+            info = {}
 
-        # 方法2：fast_info 備援（較穩定）
-        fast = {}
-        try:
-            fi = getattr(ticker, "fast_info", None)
-            if fi:
-                # fast_info 可能是物件或 dict
-                if hasattr(fi, "items"):
-                    fast = dict(fi)
-                else:
-                    fast = {k: getattr(fi, k, None) for k in [
-                        "market_cap", "last_price", "year_high", "year_low",
-                        "currency", "shares"
-                    ]}
-        except Exception as e:
-            logger.warning(f"fast_info 失敗 {symbol}: {e}")
-
-        def pick(*keys):
-            for k in keys:
-                v = info.get(k)
-                if v is not None and v != "":
-                    return v
-            return None
-
-        result["longName"] = pick("longName", "shortName") or symbol
-        result["sector"] = pick("sector")
-        result["industry"] = pick("industry")
-        result["marketCap"] = pick("marketCap") or fast.get("market_cap")
-        result["revenue"] = pick("totalRevenue", "revenue")
-        result["revenueGrowth"] = pick("revenueGrowth")
-        result["grossMargins"] = pick("grossMargins")
-        result["profitMargins"] = pick("profitMargins")
-        result["trailingPE"] = pick("trailingPE", "peRatio")
-        result["forwardPE"] = pick("forwardPE")
-        result["eps"] = pick("trailingEps", "epsTrailingTwelveMonths")
-        result["dividendYield"] = pick("dividendYield")
-        result["fiftyTwoWeekHigh"] = pick("fiftyTwoWeekHigh") or fast.get("year_high")
-        result["fiftyTwoWeekLow"] = pick("fiftyTwoWeekLow") or fast.get("year_low")
-        result["recommendation"] = pick("recommendationKey")
-        result["targetMeanPrice"] = pick("targetMeanPrice")
-        result["currency"] = pick("currency") or ("HKD" if is_hk else "USD")
-        result["website"] = pick("website")
-
-        # 若市值仍空，用股價 x 股本粗估
-        if result["marketCap"] is None:
-            try:
-                price = fast.get("last_price") or pick("currentPrice", "regularMarketPrice")
-                shares = fast.get("shares") or pick("sharesOutstanding")
-                if price and shares:
-                    result["marketCap"] = float(price) * float(shares)
-            except Exception:
-                pass
+        def extract_financials(df, max_cols=4):
+            rows = []
+            if df is None or getattr(df, "empty", True):
+                return rows
+            cols = list(df.columns)[:max_cols]
+            for col in cols:
+                date_str = col.strftime("%Y-%m-%d") if hasattr(col, "strftime") else str(col)[:10]
+                rev = net = gross = op = None
+                for key in df.index:
+                    k = str(key).lower()
+                    try:
+                        val = df.loc[key, col]
+                        if val is None or str(val) == "nan":
+                            continue
+                        val = float(val)
+                    except Exception:
+                        continue
+                    if rev is None and ("total revenue" in k or k == "revenue" or "operating revenue" in k):
+                        rev = val
+                    if net is None and "net income" in k:
+                        net = val
+                    if gross is None and "gross profit" in k:
+                        gross = val
+                    if op is None and ("operating income" in k or "operating income loss" in k):
+                        op = val
+                rows.append({
+                    "date": date_str,
+                    "revenue": rev,
+                    "net_income": net,
+                    "gross_profit": gross,
+                    "operating_income": op
+                })
+            return rows
 
         # 季報
         try:
-            qf = ticker.quarterly_financials
-            if qf is not None and not qf.empty:
-                cols = list(qf.columns)[:4]
-                for col in cols:
-                    date_str = col.strftime("%Y-%m-%d") if hasattr(col, "strftime") else str(col)[:10]
-                    rev = None
-                    net = None
-                    for key in qf.index:
-                        k = str(key).lower()
-                        if rev is None and ("total revenue" in k or k == "revenue" or "operating revenue" in k):
-                            try:
-                                val = qf.loc[key, col]
-                                if val is not None and str(val) != "nan":
-                                    rev = float(val)
-                            except Exception:
-                                pass
-                        if net is None and "net income" in k:
-                            try:
-                                val = qf.loc[key, col]
-                                if val is not None and str(val) != "nan":
-                                    net = float(val)
-                            except Exception:
-                                pass
-                    result["quarterly"].append({
-                        "date": date_str,
-                        "revenue": rev,
-                        "net_income": net
-                    })
+            result["quarterly"] = extract_financials(ticker.quarterly_financials, 5)
         except Exception as e:
-            logger.warning(f"季報資料 {symbol}: {e}")
+            logger.warning(f"季報 {symbol}: {e}")
 
-        # 檢查是否幾乎全空
-        key_fields = ["marketCap", "revenue", "trailingPE", "eps", "fiftyTwoWeekHigh"]
-        if all(result.get(k) is None for k in key_fields):
-            result["error"] = "Yahoo Finance 暫未提供此股票完整基本面資料（港股較常見）。請點上方官方連結查看原始財報。"
+        # 年報
+        try:
+            result["annual"] = extract_financials(ticker.financials, 3)
+        except Exception as e:
+            logger.warning(f"年報 {symbol}: {e}")
+
+        # ===== 根據財報產生詳細文字分析 =====
+        analysis = []
+        q = result["quarterly"]
+
+        if len(q) >= 2:
+            latest = q[0]
+            prev = q[1]
+            analysis.append(f"最新一季（約 {latest['date']}）與前一季（約 {prev['date']}）對比：")
+
+            if latest.get("revenue") is not None and prev.get("revenue") is not None and prev["revenue"] != 0:
+                chg = (latest["revenue"] - prev["revenue"]) / abs(prev["revenue"]) * 100
+                direction = "成長" if chg > 0 else "下滑"
+                analysis.append(f"・營收較前季{direction} {abs(chg):.1f}%（{format_number(prev['revenue'])} → {format_number(latest['revenue'])}）。")
+            elif latest.get("revenue") is not None:
+                analysis.append(f"・最新一季營收約 {format_number(latest['revenue'])}。")
+
+            if latest.get("net_income") is not None and prev.get("net_income") is not None:
+                if prev["net_income"] != 0:
+                    chg = (latest["net_income"] - prev["net_income"]) / abs(prev["net_income"]) * 100
+                    direction = "成長" if chg > 0 else "下滑"
+                    analysis.append(f"・淨利較前季{direction} {abs(chg):.1f}%（{format_number(prev['net_income'])} → {format_number(latest['net_income'])}）。")
+                else:
+                    analysis.append(f"・最新一季淨利約 {format_number(latest['net_income'])}。")
+            elif latest.get("net_income") is not None:
+                analysis.append(f"・最新一季淨利約 {format_number(latest['net_income'])}。")
+
+            # 毛利率粗估
+            if latest.get("revenue") and latest.get("gross_profit") and latest["revenue"] != 0:
+                gm = latest["gross_profit"] / latest["revenue"] * 100
+                analysis.append(f"・最新一季毛利率約 {gm:.1f}%。")
+
+        if len(q) >= 4:
+            # 與一年前同季比（第4筆）
+            yoy = q[3]
+            latest = q[0]
+            if latest.get("revenue") and yoy.get("revenue") and yoy["revenue"] != 0:
+                chg = (latest["revenue"] - yoy["revenue"]) / abs(yoy["revenue"]) * 100
+                direction = "成長" if chg > 0 else "下滑"
+                analysis.append(f"・與約一年前同季相比，營收{direction} {abs(chg):.1f}%。")
+            if latest.get("net_income") is not None and yoy.get("net_income") is not None and yoy["net_income"] != 0:
+                chg = (latest["net_income"] - yoy["net_income"]) / abs(yoy["net_income"]) * 100
+                direction = "成長" if chg > 0 else "下滑"
+                analysis.append(f"・與約一年前同季相比，淨利{direction} {abs(chg):.1f}%。")
+
+        # 年報趨勢
+        a = result["annual"]
+        if len(a) >= 2 and a[0].get("revenue") and a[1].get("revenue") and a[1]["revenue"] != 0:
+            chg = (a[0]["revenue"] - a[1]["revenue"]) / abs(a[1]["revenue"]) * 100
+            direction = "成長" if chg > 0 else "下滑"
+            analysis.append(f"・最近兩個完整會計年度，營收{direction} {abs(chg):.1f}%。")
+
+        if not analysis:
+            analysis.append("目前無法從 Yahoo Finance 取得足夠的季報/年報數字進行對比。")
+            analysis.append("請點下方官方連結，直接查看公司向監管機構申報的原始財報。")
+            result["error"] = "財報數字不完整（港股或部分美股較常見）"
+        else:
+            analysis.append("以上數字來自公司正式財報彙整，建議再對照官方原始文件確認。")
+
+        result["analysis_text"] = analysis
 
     except Exception as e:
-        logger.error(f"公司資料錯誤 {symbol}: {e}")
-        result["error"] = f"取得資料時發生錯誤：{e}"
+        logger.error(f"公司財報錯誤 {symbol}: {e}")
+        result["error"] = str(e)
+        result["analysis_text"] = ["取得財報資料時發生錯誤，請改以官方連結查看。"]
 
     return result
+
+
 
 def format_number(n):
     if n is None:
@@ -962,78 +968,54 @@ def stock_detail(symbol):
     analysis = generate_stock_analysis(symbol, name, performance, news_list=stock_news)
     company = get_company_info(symbol)
 
-    # 最近幾季財報表格
-    quarterly_html = ""
+
+    # ===== 財報詳細分析區塊 =====
     qlist = company.get("quarterly") or []
+    alist = company.get("annual") or []
+    analysis_lines = company.get("analysis_text") or []
+
+    # 季報表
+    quarterly_html = ""
     if qlist:
-        quarterly_html = '<div class="section-title" style="margin-top:8px;">最近幾季營收 / 淨利（來自正式財報）</div>'
-        quarterly_html += '<table class="data-table"><thead><tr><th>報告期</th><th>營收</th><th>淨利</th></tr></thead><tbody>'
+        quarterly_html = '<table class="data-table"><thead><tr><th>報告期</th><th>營收</th><th>毛利</th><th>營業利益</th><th>淨利</th></tr></thead><tbody>'
         for q in qlist:
-            quarterly_html += f"<tr><td>{q.get('date','—')}</td><td>{format_number(q.get('revenue'))}</td><td>{format_number(q.get('net_income'))}</td></tr>"
+            quarterly_html += f"<tr><td>{q.get('date','—')}</td><td>{format_number(q.get('revenue'))}</td><td>{format_number(q.get('gross_profit'))}</td><td>{format_number(q.get('operating_income'))}</td><td>{format_number(q.get('net_income'))}</td></tr>"
         quarterly_html += '</tbody></table>'
     else:
-        quarterly_html = '<p style="color:var(--muted); font-size:0.9rem; margin-bottom:16px;">此股票暫無完整季報彙整資料，請點上方官方連結查看原始財報。</p>'
+        quarterly_html = '<p style="color:var(--muted); font-size:0.9rem;">暫無季報數字可顯示。</p>'
 
-    
-    cross = cross_compare_news(stock_news)
+    # 年報表
+    annual_html = ""
+    if alist:
+        annual_html = '<table class="data-table" style="margin-top:12px;"><thead><tr><th>會計年度</th><th>營收</th><th>毛利</th><th>營業利益</th><th>淨利</th></tr></thead><tbody>'
+        for a in alist:
+            annual_html += f"<tr><td>{a.get('date','—')}</td><td>{format_number(a.get('revenue'))}</td><td>{format_number(a.get('gross_profit'))}</td><td>{format_number(a.get('operating_income'))}</td><td>{format_number(a.get('net_income'))}</td></tr>"
+        annual_html += '</tbody></table>'
 
-    # 競爭公司新聞
-    comps = COMPETITORS.get(symbol, [])[:3]
-    competitor_news_html = ""
-    for comp in comps:
-        c_news = get_stock_news(comp, limit=2)
-        comp_name = US_WATCHLIST.get(comp) or HK_WATCHLIST.get(comp) or comp
-        if c_news:
-            competitor_news_html += f'<h4 style="margin:16px 0 8px; color:#93c5fd;">{comp}（{comp_name}）</h4>'
-            for n in c_news:
-                competitor_news_html += f'''
-                <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-                    <div style="font-size:0.95rem;">{n.get("title","")}</div>
-                    <div style="font-size:0.8rem; color:var(--muted); margin:4px 0;">{n.get("published","")[:16].replace("T"," ")} ｜ {n.get("publisher",{}).get("name","")}</div>
-                    <a class="link-btn" href="{n.get("url","#")}" target="_blank" rel="noopener">閱讀原文 →</a>
-                </div>'''
+    analysis_html = "".join([f"<li>{line}</li>" for line in analysis_lines])
 
-    if "error" in price:
-        price_html = "<div>無法取得即時價格</div>"
-    else:
-        cls = "up" if price["change_pct"] > 0 else ("down" if price["change_pct"] < 0 else "flat")
-        arrow = "▲" if price["change_pct"] > 0 else ("▼" if price["change_pct"] < 0 else "─")
-        price_html = f'''
-        <div>
-            <div class="stock-price-big">{curr}{price["price"]}</div>
-            <div class="{cls}" style="font-size:1.2rem;">{arrow} {price["change"]:+.2f} ({price["change_pct"]:+.2f}%)</div>
-            <div style="margin-top:8px; color:var(--muted); font-size:0.9rem;">
-                開 {curr}{price["open"]} ｜ 高 {curr}{price["high"]} ｜ 低 {curr}{price["low"]} ｜ 量 {price["volume"]:,}
-            </div>
-        </div>'''
-
-    # 公司基本面
-    info_html = f"""
+    fundamentals_html = f"""
     <div class="summary-box" style="margin-bottom:16px;">
         <p style="font-size:0.9rem; color:var(--muted); margin-bottom:10px;">
-            以下數字整理自公司向監管機構申報的正式財報（美股：SEC 10-K / 10-Q；港股：聯交所公告），
-            經 Yahoo Finance 彙整後顯示。建議以官方原始文件為最終依據。
+            以下分析根據公司向監管機構申報的正式財報彙整（美股 SEC、港股聯交所）。
+            數字可能有延遲，請以官方原始文件為最終依據。
             {('<br><span style="color:#fbbf24;">⚠ ' + str(company.get("error")) + '</span>') if company.get("error") else ""}
         </p>
-        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <div style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:8px;">
             <a class="link-btn" href="{company.get('official_url', '#')}" target="_blank" rel="noopener">📄 {company.get('official_label', '官方財報')}</a>
-            {"<a class='link-btn' href='" + company.get('website') + "' target='_blank' rel='noopener'>🏢 公司官網</a>" if company.get("website") else ""}
+            {"<a class='link-btn' href='" + company['website'] + "' target='_blank' rel='noopener'>🏢 公司官網</a>" if company.get("website") else ""}
         </div>
     </div>
-    <div class="info-grid">
-        <div class="info-item"><div class="label">產業</div><div class="value">{company.get("sector","—")}</div></div>
-        <div class="info-item"><div class="label">市值</div><div class="value">{format_number(company.get("marketCap"))}</div></div>
-        <div class="info-item"><div class="label">營收（最新年報/季報）</div><div class="value">{format_number(company.get("revenue"))}</div></div>
-        <div class="info-item"><div class="label">營收成長</div><div class="value">{(str(round(company.get("revenueGrowth")*100,1))+"%") if company.get("revenueGrowth") else "—"}</div></div>
-        <div class="info-item"><div class="label">本益比 (TTM)</div><div class="value">{round(company.get("trailingPE"),2) if company.get("trailingPE") else "—"}</div></div>
-        <div class="info-item"><div class="label">前瞻本益比</div><div class="value">{round(company.get("forwardPE"),2) if company.get("forwardPE") else "—"}</div></div>
-        <div class="info-item"><div class="label">EPS</div><div class="value">{round(company.get("eps"),2) if company.get("eps") else "—"}</div></div>
-        <div class="info-item"><div class="label">毛利率</div><div class="value">{(str(round(company.get("grossMargins")*100,1))+"%") if company.get("grossMargins") else "—"}</div></div>
-        <div class="info-item"><div class="label">淨利率</div><div class="value">{(str(round(company.get("profitMargins")*100,1))+"%") if company.get("profitMargins") else "—"}</div></div>
-        <div class="info-item"><div class="label">52週高</div><div class="value">{company.get("fiftyTwoWeekHigh") or "—"}</div></div>
-        <div class="info-item"><div class="label">52週低</div><div class="value">{company.get("fiftyTwoWeekLow") or "—"}</div></div>
-        <div class="info-item"><div class="label">分析師目標價</div><div class="value">{company.get("targetMeanPrice") or "—"}</div></div>
+
+    <div class="summary-box">
+        <h3>📊 財報趨勢分析</h3>
+        <ul style="margin-left:18px; color:var(--muted); line-height:1.8;">{analysis_html}</ul>
     </div>
+
+    <div class="section-title" style="margin-top:8px;">最近幾季財報對比</div>
+
+    <div class="section-title" style="margin-top:20px;">最近年度財報</div>
+    {annual_html if annual_html else '<p style="color:var(--muted); font-size:0.9rem;">暫無年度財報數字可顯示。</p>'}
     """
 
     perf_html = '<div class="perf-grid">'
@@ -1100,9 +1082,8 @@ def stock_detail(symbol):
         {price_html}
     </div>
 
-    <div class="section-title">公司基本面與營收</div>
-    {info_html}
-    {quarterly_html}
+    <div class="section-title">公司財報詳細分析</div>
+    {fundamentals_html}
 
     <div class="section-title">不同時間報酬率</div>
     {perf_html}
