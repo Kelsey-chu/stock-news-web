@@ -967,7 +967,42 @@ def stock_detail(symbol):
     stock_news = get_stock_news(symbol, limit=6)
     analysis = generate_stock_analysis(symbol, name, performance, news_list=stock_news)
     company = get_company_info(symbol)
+    cross = cross_compare_news(stock_news)
 
+    # 價格區塊
+    if "error" in price:
+        price_html = "<div>無法取得即時價格</div>"
+    else:
+        cls = "up" if price["change_pct"] > 0 else ("down" if price["change_pct"] < 0 else "flat")
+        arrow = "▲" if price["change_pct"] > 0 else ("▼" if price["change_pct"] < 0 else "─")
+        price_html = (
+            f'<div><div class="stock-price-big">{curr}{price["price"]}</div>'
+            f'<div class="{cls}" style="font-size:1.2rem;">{arrow} {price["change"]:+.2f} ({price["change_pct"]:+.2f}%)</div>'
+            f'<div style="margin-top:8px; color:var(--muted); font-size:0.9rem;">'
+            f'開 {curr}{price["open"]} ｜ 高 {curr}{price["high"]} ｜ 低 {curr}{price["low"]} ｜ 量 {price["volume"]:,}'
+            f'</div></div>'
+        )
+
+    # 競爭公司新聞
+    comps = COMPETITORS.get(symbol, [])[:3]
+    competitor_news_html = ""
+    for comp in comps:
+        c_news = get_stock_news(comp, limit=2)
+        comp_name = US_WATCHLIST.get(comp) or HK_WATCHLIST.get(comp) or comp
+        if c_news:
+            competitor_news_html += f'<h4 style="margin:16px 0 8px; color:#93c5fd;">{comp}（{comp_name}）</h4>'
+            for n in c_news:
+                title = n.get("title", "")
+                pub = n.get("published", "")[:16].replace("T", " ")
+                publisher = n.get("publisher", {}).get("name", "")
+                url = n.get("url", "#")
+                competitor_news_html += (
+                    f'<div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">'
+                    f'<div style="font-size:0.95rem;">{title}</div>'
+                    f'<div style="font-size:0.8rem; color:var(--muted); margin:4px 0;">{pub} ｜ {publisher}</div>'
+                    f'<a class="link-btn" href="{url}" target="_blank" rel="noopener">閱讀原文 →</a>'
+                    f'</div>'
+                )
 
     # ===== 財報詳細分析區塊 =====
     qlist = company.get("quarterly") or []
@@ -1013,6 +1048,7 @@ def stock_detail(symbol):
     </div>
 
     <div class="section-title" style="margin-top:8px;">最近幾季財報對比</div>
+    {quarterly_html}
 
     <div class="section-title" style="margin-top:20px;">最近年度財報</div>
     {annual_html if annual_html else '<p style="color:var(--muted); font-size:0.9rem;">暫無年度財報數字可顯示。</p>'}
