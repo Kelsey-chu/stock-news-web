@@ -251,6 +251,11 @@ def get_company_info(symbol):
             result["error"] = "財報數字不完整（港股或部分美股較常見）"
         else:
             analysis.append("以上數字來自公司正式財報彙整，建議再對照官方原始文件確認。")
+            analysis.append(
+                f'資料連結：Yahoo Finance 財報頁 '
+                f'(<a href="https://finance.yahoo.com/quote/{symbol}/financials" target="_blank" rel="noopener" '
+                f'style="color:#60a5fa; text-decoration:underline;">開啟 {symbol} Financials</a>)'
+            )
 
         result["analysis_text"] = analysis
 
@@ -328,7 +333,7 @@ def get_performance(symbol):
     return result
 
 def generate_stock_analysis(symbol, name, performance, news_list=None):
-    """結合價格走勢 + 近期新聞，產生更詳細的走勢解釋"""
+    """結合價格走勢 + 近期新聞，產生更詳細的走勢解釋（含新聞連結）"""
     p = performance or {}
     news_list = news_list or []
     r1d = p.get("1d")
@@ -336,7 +341,6 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
     r1mo = p.get("1mo")
     r1y = p.get("1y")
 
-    # ===== 1. 近期走勢描述 =====
     recent_parts = []
     if r1d is not None:
         if r1d > 2: recent_parts.append(f"近1日大漲 {r1d}%")
@@ -356,7 +360,6 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
 
     recent_summary = "；".join(recent_parts) if recent_parts else "近期波動相對有限。"
 
-    # ===== 2. 從新聞提取情緒與主題 =====
     bullish_news = []
     bearish_news = []
     neutral_news = []
@@ -368,7 +371,6 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
         label = a.get("label", "neutral")
         title = n.get("title", "")
         url = n.get("url", "#")
-
         item = {"title": title, "url": url, "score": score}
 
         if label == "positive" or score > 0.25:
@@ -392,39 +394,54 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
         if any(k in t for k in ["lawsuit", "probe", "investigation", "監管", "訴訟"]):
             themes.add("監管/訴訟風險")
 
-    # ===== 3. 用新聞交叉解釋走勢原因（詳細版） =====
-    reasons = []
+    def news_link(item, idx):
+        """產生可點擊的新聞條目 HTML"""
+        title = item.get("title") or "（無標題）"
+        url = item.get("url") or "#"
+        score = item.get("score", 0)
+        return (
+            f'{idx}. <a href="{url}" target="_blank" rel="noopener" '
+            f'style="color:#60a5fa; text-decoration:underline;">{title}</a>'
+            f'（情緒 {score:+.2f}）'
+        )
 
-    # 價格方向
+    reasons = []
     price_up = (r1d is not None and r1d > 1) or (r1w is not None and r1w > 3)
     price_down = (r1d is not None and r1d < -1) or (r1w is not None and r1w < -3)
+
+    # 股價資料來源說明
+    reasons.append(
+        f'【股價資料來源】Yahoo Finance 歷史報價 '
+        f'(<a href="https://finance.yahoo.com/quote/{symbol}" target="_blank" rel="noopener" '
+        f'style="color:#60a5fa; text-decoration:underline;">查看 {symbol} 頁面</a>)'
+    )
 
     if price_up:
         reasons.append(f"【價格表現】近期股價偏強（近1日 {r1d if r1d is not None else '—'}%，近1週 {r1w if r1w is not None else '—'}%）。")
         if bullish_news:
-            reasons.append("【新聞交叉】近期偏多新聞較多，可能是支撐股價上漲的重要原因：")
-            for i, bn in enumerate(bullish_news[:3], 1):
-                reasons.append(f"　{i}. 「{bn['title']}」（情緒分數 {bn['score']:+.2f}）")
+            reasons.append("【新聞交叉｜偏多】以下正面新聞可能支撐上漲（點標題可看原文）：")
+            for i, bn in enumerate(bullish_news[:4], 1):
+                reasons.append("　" + news_link(bn, i))
             reasons.append("這些正面消息可能吸引買盤，或讓市場重新評估公司前景。")
         if bearish_news:
-            reasons.append("【需注意】同時也有偏空新聞出現，顯示上漲並非毫無雜音：")
-            for i, bn in enumerate(bearish_news[:2], 1):
-                reasons.append(f"　{i}. 「{bn['title']}」")
+            reasons.append("【需注意｜偏空新聞】上漲同時仍有負面消息：")
+            for i, bn in enumerate(bearish_news[:3], 1):
+                reasons.append("　" + news_link(bn, i))
             reasons.append("若後續負面消息發酵，短線可能出現獲利了結。")
         if not bullish_news and not bearish_news:
-            reasons.append("【新聞交叉】近期沒有特別強烈的正面或負面新聞，上漲可能更多來自大盤或產業資金流向。")
+            reasons.append("【新聞交叉】近期沒有特別強烈的正負面新聞，上漲可能更多來自大盤或產業資金流向。")
 
     elif price_down:
         reasons.append(f"【價格表現】近期股價偏弱（近1日 {r1d if r1d is not None else '—'}%，近1週 {r1w if r1w is not None else '—'}%）。")
         if bearish_news:
-            reasons.append("【新聞交叉】近期偏空新聞較多，可能是造成股價下跌的主要因素：")
-            for i, bn in enumerate(bearish_news[:3], 1):
-                reasons.append(f"　{i}. 「{bn['title']}」（情緒分數 {bn['score']:+.2f}）")
+            reasons.append("【新聞交叉｜偏空】以下負面新聞可能造成賣壓（點標題可看原文）：")
+            for i, bn in enumerate(bearish_news[:4], 1):
+                reasons.append("　" + news_link(bn, i))
             reasons.append("負面消息容易引發賣壓或避險情緒，尤其在成交量放大時影響更明顯。")
         if bullish_news:
-            reasons.append("【需注意】雖然股價下跌，但仍有部分偏多新聞：")
-            for i, bn in enumerate(bullish_news[:2], 1):
-                reasons.append(f"　{i}. 「{bn['title']}」")
+            reasons.append("【需注意｜仍有偏多新聞】：")
+            for i, bn in enumerate(bullish_news[:3], 1):
+                reasons.append("　" + news_link(bn, i))
             reasons.append("若這些正面因素後續被市場重新重視，可能出現技術性反彈。")
         if not bullish_news and not bearish_news:
             reasons.append("【新聞交叉】近期新聞情緒不明顯，下跌可能更多來自大盤回檔、獲利了結或資金輪動。")
@@ -432,22 +449,20 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
     else:
         reasons.append("【價格表現】近期股價波動相對有限，方向尚未明確。")
         if bullish_news or bearish_news:
-            reasons.append("【新聞交叉】雖然價格震盪，但新聞面並非完全平靜：")
+            reasons.append("【新聞交叉】價格震盪但新聞面並非完全平靜：")
             if bullish_news:
-                reasons.append(f"　正面消息例如：「{bullish_news[0]['title']}」")
+                reasons.append("　偏多：" + news_link(bullish_news[0], 1))
             if bearish_news:
-                reasons.append(f"　負面消息例如：「{bearish_news[0]['title']}」")
+                reasons.append("　偏空：" + news_link(bearish_news[0], 1))
             reasons.append("多空消息並存，可能是造成股價上不來、下不去的原因之一。")
         else:
             reasons.append("【新聞交叉】近期相關新聞不多或情緒中性，市場觀望氣氛濃厚。")
 
-    # 主題補充
     if themes:
         reasons.append(f"【主要新聞主題】目前市場較關注：{'、'.join(themes)}。這些主題的後續發展，將持續影響短線走勢。")
 
-    reasons.append("【綜合建議】單一新聞不應作為進出唯一依據，建議搭配成交量、大盤氣氛與公司基本面一起判斷。")
+    reasons.append("【綜合建議】單一新聞不應作為進出唯一依據，建議搭配成交量、大盤氣氛與公司基本面一起判斷。所有新聞標題均可點擊查看原文。")
 
-    # ===== 4. 短長期展望（略作調整，更貼近新聞） =====
     short_term = []
     if price_up and bullish_news and not bearish_news:
         short_term.append("新聞面偏多且股價同步走強，短期動能仍有機會延續，但需留意是否已反應過度。")
@@ -469,7 +484,7 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
     else:
         long_term.append("長期表現大致中性，未來仍取決於公司基本面、產業周期與總體經濟。")
     if themes:
-        long_term.append(f"目前新聞反覆提到「{'、'.join(list(themes)[:3])}」，這些因素的長期演變，將是影響未來一年到一年走勢的重要變數。")
+        long_term.append(f"目前新聞反覆提到「{'、'.join(list(themes)[:3])}」，這些因素的長期演變，將是影響未來走勢的重要變數。")
     long_term.append("建議持續追蹤財報、競爭對手動態與產業資本支出變化。")
 
     return {
@@ -479,6 +494,8 @@ def generate_stock_analysis(symbol, name, performance, news_list=None):
         "long_term": long_term,
         "performance": p
     }
+
+
 
 def get_daily_closes(symbols, days=10):
     result = {}
@@ -1064,7 +1081,7 @@ def stock_detail(symbol):
             perf_html += f'<div class="perf-item"><div class="label">{label}</div><div class="value {cls}">{val:+.2f}%</div></div>'
     perf_html += '</div>'
 
-    reasons_html = "".join([f"<li>{r}</li>" for r in analysis["reasons"]])
+    reasons_html = "".join([f"<li style=\"line-height:1.7;\">{r}</li>" for r in analysis["reasons"]])
     short_html = "".join([f"<li>{s}</li>" for s in analysis["short_term"]])
     long_html = "".join([f"<li>{l}</li>" for l in analysis["long_term"]])
 
