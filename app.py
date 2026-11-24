@@ -115,12 +115,105 @@ def get_stock_price(symbol):
         return {"symbol": symbol, "error": str(e)}
 
 def get_company_info(symbol):
-    """取得公司基本面（資料最終來自公司向監管機構申報的正式財報）"""
+    """取得公司基本面（資料最終來自公司向監管機構申報的正式財報）
+    加強：多欄位備援、港股相容、失敗時回傳錯誤訊息
+    """
+    is_hk = symbol.endswith(".HK")
+    if is_hk:
+        official_url = "https://www.hkexnews.hk/search/titlesearch.xhtml?lang=zh"
+        official_label = "港交所披露易（官方公告）"
+    else:
+        official_url = f"https://www.sec.gov/edgar/search/#/category=custom&entityName={symbol}"
+        official_label = "SEC EDGAR（美國證交會正式財報）"
+
+    result = {
+        "longName": symbol,
+        "sector": None,
+        "industry": None,
+        "marketCap": None,
+        "revenue": None,
+        "revenueGrowth": None,
+        "grossMargins": None,
+        "profitMargins": None,
+        "trailingPE": None,
+        "forwardPE": None,
+        "eps": None,
+        "dividendYield": None,
+        "fiftyTwoWeekHigh": None,
+        "fiftyTwoWeekLow": None,
+        "recommendation": None,
+        "targetMeanPrice": None,
+        "currency": "HKD" if is_hk else "USD",
+        "quarterly": [],
+        "official_url": official_url,
+        "official_label": official_label,
+        "website": None,
+        "error": None
+    }
+
     try:
         ticker = yf.Ticker(symbol)
-        info = ticker.info or {}
 
-        quarterly = []
+        # 方法1：info
+        info = {}
+        try:
+            info = ticker.info or {}
+        except Exception as e:
+            logger.warning(f"info 失敗 {symbol}: {e}")
+
+        # 方法2：fast_info 備援（較穩定）
+        fast = {}
+        try:
+            fi = getattr(ticker, "fast_info", None)
+            if fi:
+                # fast_info 可能是物件或 dict
+                if hasattr(fi, "items"):
+                    fast = dict(fi)
+                else:
+                    fast = {k: getattr(fi, k, None) for k in [
+                        "market_cap", "last_price", "year_high", "year_low",
+                        "currency", "shares"
+                    ]}
+        except Exception as e:
+            logger.warning(f"fast_info 失敗 {symbol}: {e}")
+
+        def pick(*keys):
+            for k in keys:
+                v = info.get(k)
+                if v is not None and v != "":
+                    return v
+            return None
+
+        result["longName"] = pick("longName", "shortName") or symbol
+        result["sector"] = pick("sector")
+        result["industry"] = pick("industry")
+        result["marketCap"] = pick("marketCap") or fast.get("market_cap")
+        result["revenue"] = pick("totalRevenue", "revenue")
+        result["revenueGrowth"] = pick("revenueGrowth")
+        result["grossMargins"] = pick("grossMargins")
+        result["profitMargins"] = pick("profitMargins")
+        result["trailingPE"] = pick("trailingPE", "peRatio")
+        result["forwardPE"] = pick("forwardPE")
+        result["eps"] = pick("trailingEps", "epsTrailingTwelveMonths")
+        result["dividendYield"] = pick("dividendYield")
+        result["fiftyTwoWeekHigh"] = pick("fiftyTwoWeekHigh") or fast.get("year_high")
+        result["fiftyTwoWeekLow"] = pick("fiftyTwoWeekLow") or fast.get("year_low")
+        result["recommendation"] = pick("recommendationKey")
+        result["targetMeanPrice"] = pick("targetMeanPrice")
+        result["currency"] = pick("currency") or ("HKD" if is_hk else "USD")
+        result["website"] = pick("website")
+
+        # 若市值仍空，用股價 x 股本粗估
+        if result["marketCap"] is None:
+            try:
+                price = fast.get("last_price") or pick("currentPrice", "regularMarketPrice")
+                shares = fast.get("shares") or pick("sharesOutstanding")
+                if price and shares:
+                    result["marketCap"] = float(price) * float(shares)
+            except Exception:
+                pass
+
+        # 季報
         try:
             qf = ticker.quarterly_financials
             if qf is not None and not qf.empty:
@@ -131,17 +224,21 @@ def get_company_info(symbol):
                     net = None
                     for key in qf.index:
                         k = str(key).lower()
-                        if "total revenue" in k or k == "revenue":
+                        if rev is None and ("total revenue" in k or k == "revenue" or "operating revenue" in k):
                             try:
-                                rev = float(qf.loc[key, col])
+                                val = qf.loc[key, col]
+                                if val is not None and str(val) != "nan":
+                                    rev = float(val)
                             except Exception:
                                 pass
-                        if "net income" in k:
+                        if net is None and "net income" in k:
                             try:
-                                net = float(qf.loc[key, col])
+                                val = qf.loc[key, col]
+                                if val is not None and str(val) != "nan":
+                                    net = float(val)
                             except Exception:
                                 pass
-                    quarterly.append({
+                    result["quarterly"].append({
                         "date": date_str,
                         "revenue": rev,
                         "net_income": net
@@ -149,42 +246,16 @@ def get_company_info(symbol):
         except Exception as e:
             logger.warning(f"季報資料 {symbol}: {e}")
 
-        is_hk = symbol.endswith(".HK")
-        if is_hk:
-            code = symbol.replace(".HK", "")
-            official_url = f"https://www.hkexnews.hk/search/titlesearch.xhtml?lang=zh"
-            official_label = "港交所披露易（官方公告）"
-        else:
-            official_url = f"https://www.sec.gov/edgar/search/#/category=custom&entityName={symbol}"
-            official_label = "SEC EDGAR（美國證交會正式財報）"
+        # 檢查是否幾乎全空
+        key_fields = ["marketCap", "revenue", "trailingPE", "eps", "fiftyTwoWeekHigh"]
+        if all(result.get(k) is None for k in key_fields):
+            result["error"] = "Yahoo Finance 暫未提供此股票完整基本面資料（港股較常見）。請點上方官方連結查看原始財報。"
 
-        website = info.get("website") or ""
-        return {
-            "longName": info.get("longName") or info.get("shortName") or symbol,
-            "sector": info.get("sector", "—"),
-            "industry": info.get("industry", "—"),
-            "marketCap": info.get("marketCap"),
-            "revenue": info.get("totalRevenue") or info.get("revenue"),
-            "revenueGrowth": info.get("revenueGrowth"),
-            "grossMargins": info.get("grossMargins"),
-            "profitMargins": info.get("profitMargins"),
-            "trailingPE": info.get("trailingPE"),
-            "forwardPE": info.get("forwardPE"),
-            "eps": info.get("trailingEps"),
-            "dividendYield": info.get("dividendYield"),
-            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
-            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
-            "recommendation": info.get("recommendationKey"),
-            "targetMeanPrice": info.get("targetMeanPrice"),
-            "currency": info.get("currency", "USD"),
-            "quarterly": quarterly,
-            "official_url": official_url,
-            "official_label": official_label,
-            "website": website
-        }
     except Exception as e:
         logger.error(f"公司資料錯誤 {symbol}: {e}")
-        return {}
+        result["error"] = f"取得資料時發生錯誤：{e}"
+
+    return result
 
 def format_number(n):
     if n is None:
@@ -942,6 +1013,7 @@ def stock_detail(symbol):
         <p style="font-size:0.9rem; color:var(--muted); margin-bottom:10px;">
             以下數字整理自公司向監管機構申報的正式財報（美股：SEC 10-K / 10-Q；港股：聯交所公告），
             經 Yahoo Finance 彙整後顯示。建議以官方原始文件為最終依據。
+            {('<br><span style="color:#fbbf24;">⚠ ' + str(company.get("error")) + '</span>') if company.get("error") else ""}
         </p>
         <div style="display:flex; flex-wrap:wrap; gap:12px;">
             <a class="link-btn" href="{company.get('official_url', '#')}" target="_blank" rel="noopener">📄 {company.get('official_label', '官方財報')}</a>
