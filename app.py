@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 美股 + 港股 完整分析網站
-功能：側邊欄、走勢圖、詳細新聞分析（正反角度）、多時間週期資料
+升級版：互動式走勢圖 + 成交量 + 自動走勢總結 + 短長期展望
 """
 
 from flask import Flask, render_template_string, jsonify, request
@@ -19,7 +19,6 @@ app = Flask(__name__)
 
 # ==================== 設定 ====================
 US_WATCHLIST = {
-    # 原本的科技股
     "AAPL": "蘋果",
     "MSFT": "微軟",
     "NVDA": "輝達",
@@ -28,16 +27,12 @@ US_WATCHLIST = {
     "AMZN": "亞馬遜",
     "META": "Meta",
     "AMD": "超微",
-    
-    # 先前加入的
     "TSM": "台積電 (TSMC)",
     "VOO": "Vanguard S&P 500 ETF",
     "IVV": "iShares Core S&P 500 ETF",
     "SPY": "SPDR S&P 500 ETF",
     "QQQ": "Invesco QQQ",
     "AVGO": "博通",
-    
-    # 新增的
     "ASML": "艾司摩爾",
     "MU": "美光科技",
     "PLTR": "Palantir",
@@ -67,8 +62,6 @@ HOURS_BACK = 48
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ==================== 工具函式 ====================
 
 def get_stock_price(symbol):
     try:
@@ -118,6 +111,108 @@ def get_history(symbol, period="1mo"):
         logger.error(f"歷史資料錯誤 {symbol}: {e}")
         return []
 
+def get_performance(symbol):
+    result = {}
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="2y")
+        if hist.empty or len(hist) < 5:
+            return {}
+        closes = hist["Close"]
+        latest = float(closes.iloc[-1])
+
+        def calc_return(days):
+            if len(closes) <= days:
+                return None
+            past = float(closes.iloc[-days-1])
+            return round((latest - past) / past * 100, 2)
+
+        result = {
+            "1d": calc_return(1),
+            "1w": calc_return(5),
+            "1mo": calc_return(21),
+            "3mo": calc_return(63),
+            "6mo": calc_return(126),
+            "1y": calc_return(252),
+        }
+    except Exception as e:
+        logger.error(f"績效計算錯誤 {symbol}: {e}")
+    return result
+
+def generate_stock_analysis(symbol, name, performance):
+    p = performance or {}
+    r1d = p.get("1d")
+    r1w = p.get("1w")
+    r1mo = p.get("1mo")
+    r3mo = p.get("3mo")
+    r6mo = p.get("6mo")
+    r1y = p.get("1y")
+
+    recent_parts = []
+    if r1d is not None:
+        if r1d > 2:
+            recent_parts.append(f"近1日大漲 {r1d}%")
+        elif r1d > 0.5:
+            recent_parts.append(f"近1日上漲 {r1d}%")
+        elif r1d < -2:
+            recent_parts.append(f"近1日大跌 {r1d}%")
+        elif r1d < -0.5:
+            recent_parts.append(f"近1日下跌 {r1d}%")
+        else:
+            recent_parts.append(f"近1日幾乎持平（{r1d}%）")
+
+    if r1w is not None:
+        if r1w > 5:
+            recent_parts.append(f"近1週累積上漲 {r1w}%，短期動能偏強")
+        elif r1w < -5:
+            recent_parts.append(f"近1週累積下跌 {r1w}%，短期出現調整")
+
+    if r1mo is not None:
+        if r1mo > 10:
+            recent_parts.append(f"近1個月大漲 {r1mo}%，中期趨勢偏多")
+        elif r1mo < -10:
+            recent_parts.append(f"近1個月下跌 {r1mo}%，中期出現明顯回檔")
+
+    recent_summary = "；".join(recent_parts) if recent_parts else "近期波動相對有限。"
+
+    reasons = []
+    if r1mo is not None and r1mo > 8:
+        reasons.append("中期漲幅較大，可能受到產業利多、財報優於預期或資金流入科技/半導體類股帶動。")
+    if r1mo is not None and r1mo < -8:
+        reasons.append("中期跌幅較大，可能受到獲利了結、大盤回檔、利率或宏觀疑慮影響。")
+    if r1w is not None and abs(r1w) > 4:
+        reasons.append("近一週波動放大，通常與特定新聞、分析師評級變動或整體市場情緒有關。")
+    if not reasons:
+        reasons.append("目前走勢相對平穩，主要受大盤與產業資金流向影響。")
+    reasons.append("成交量若明顯放大，通常代表該段漲跌有較真實的資金參與。")
+
+    short_term = []
+    if r1d is not None and r1d > 1.5 and r1w is not None and r1w > 3:
+        short_term.append("短期動能偏強，若無突發利空，未來數日仍有機會延續偏多走勢。")
+    elif r1d is not None and r1d < -1.5 and r1w is not None and r1w < -3:
+        short_term.append("短期出現較明顯賣壓，未來一週需留意是否繼續調整或出現反彈。")
+    else:
+        short_term.append("短期方向較不明顯，可能以震盪為主，建議觀察能否站穩近期低點或突破前高。")
+    short_term.append("重點觀察：成交量是否配合、是否有重要新聞或財報公布。")
+
+    long_term = []
+    if r1y is not None and r1y > 30:
+        long_term.append("過去一年漲幅顯著，長期趨勢仍偏多，但需留意估值是否已偏高，未來回報可能趨於平穩或波動加大。")
+    elif r1y is not None and r1y < -20:
+        long_term.append("過去一年表現偏弱，若基本面未明顯惡化，長期有機會出現價值修復，但仍需確認產業前景。")
+    else:
+        long_term.append("長期表現大致中性，未來走向將主要取決於公司基本面、產業周期與總體經濟環境。")
+    long_term.append("半導體、AI 相關標的長期仍受技術發展與資本支出影響較大；ETF 則較貼近大盤表現。")
+    long_term.append("建議搭配公司財報、產業新聞與大盤趨勢一起判斷，而非單看價格走勢。")
+
+    return {
+        "recent_summary": recent_summary,
+        "reasons": reasons,
+        "short_term": short_term,
+        "long_term": long_term,
+        "performance": p
+    }
+
 def fetch_us_news(symbol):
     url = f"https://api.quotelinks.com/v1/news/{symbol}"
     req = urllib.request.Request(url, headers={"User-Agent": "StockNewsFull/1.0"})
@@ -153,7 +248,6 @@ def fetch_hk_news(symbol):
         return []
 
 def analyze_news(item, market="US"):
-    title = item.get("title", "")
     tags = item.get("tags", [])
     sent = item.get("sentiment", {})
     score = sent.get("score", 0)
@@ -212,7 +306,7 @@ def get_dashboard_data(cache_key):
     price_info = {}
     for sym in list(US_WATCHLIST.keys()) + list(HK_WATCHLIST.keys()):
         price_info[sym] = get_stock_price(sym)
-        time.sleep(0.15)
+        time.sleep(0.12)
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "price_info": price_info
@@ -228,10 +322,10 @@ def get_news_data(market, cache_key):
     for symbol in watchlist:
         if market == "US":
             items = fetch_us_news(symbol)
-            time.sleep(0.5)
+            time.sleep(0.45)
         else:
             items = fetch_hk_news(symbol)
-            time.sleep(0.3)
+            time.sleep(0.25)
 
         for item in items:
             try:
@@ -319,6 +413,14 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; ma
 table.data-table th, table.data-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: right; }
 table.data-table th { color: var(--muted); font-weight: 500; }
 table.data-table td:first-child, table.data-table th:first-child { text-align: left; }
+.perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin: 16px 0; }
+.perf-item { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+.perf-item .label { font-size: 0.8rem; color: var(--muted); }
+.perf-item .value { font-size: 1.1rem; font-weight: 600; margin-top: 4px; }
+.summary-box { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+.summary-box h3 { font-size: 1.1rem; margin-bottom: 12px; color: #93c5fd; }
+.summary-box p, .summary-box li { color: var(--muted); line-height: 1.7; font-size: 0.95rem; }
+.summary-box ul { margin-left: 18px; margin-top: 6px; }
 @media (max-width: 800px) { .sidebar { width: 100%; height: auto; position: relative; } .main { margin-left: 0; padding: 20px; } body { flex-direction: column; } }
 """
 
@@ -417,57 +519,194 @@ def stock_detail(symbol):
     is_hk = symbol.endswith(".HK")
     curr = "HK$" if is_hk else "$"
 
+    performance = get_performance(symbol)
+    analysis = generate_stock_analysis(symbol, name, performance)
+
     if "error" in price:
         price_html = "<div>無法取得即時價格</div>"
     else:
         cls = "up" if price["change_pct"] > 0 else ("down" if price["change_pct"] < 0 else "flat")
         arrow = "▲" if price["change_pct"] > 0 else ("▼" if price["change_pct"] < 0 else "─")
-        price_html = f'<div><div class="stock-price-big">{curr}{price["price"]}</div><div class="{cls}" style="font-size:1.2rem;">{arrow} {price["change"]:+.2f} ({price["change_pct"]:+.2f}%)</div><div style="margin-top:8px; color:var(--muted); font-size:0.9rem;">開 {curr}{price["open"]} ｜ 高 {curr}{price["high"]} ｜ 低 {curr}{price["low"]} ｜ 量 {price["volume"]:,}</div></div>'
+        price_html = f'''
+        <div>
+            <div class="stock-price-big">{curr}{price["price"]}</div>
+            <div class="{cls}" style="font-size:1.2rem;">{arrow} {price["change"]:+.2f} ({price["change_pct"]:+.2f}%)</div>
+            <div style="margin-top:8px; color:var(--muted); font-size:0.9rem;">
+                開 {curr}{price["open"]} ｜ 高 {curr}{price["high"]} ｜ 低 {curr}{price["low"]} ｜ 量 {price["volume"]:,}
+            </div>
+        </div>'''
+
+    perf_html = '<div class="perf-grid">'
+    labels = [("1d", "1日"), ("1w", "1週"), ("1mo", "1月"), ("3mo", "3月"), ("6mo", "6月"), ("1y", "1年")]
+    for key, label in labels:
+        val = analysis["performance"].get(key)
+        if val is None:
+            perf_html += f'<div class="perf-item"><div class="label">{label}</div><div class="value">—</div></div>'
+        else:
+            cls = "up" if val > 0 else ("down" if val < 0 else "flat")
+            perf_html += f'<div class="perf-item"><div class="label">{label}</div><div class="value {cls}">{val:+.2f}%</div></div>'
+    perf_html += '</div>'
+
+    reasons_html = "".join([f"<li>{r}</li>" for r in analysis["reasons"]])
+    short_html = "".join([f"<li>{s}</li>" for s in analysis["short_term"]])
+    long_html = "".join([f"<li>{l}</li>" for l in analysis["long_term"]])
 
     content = f"""
     <div class="stock-header">
-        <div><h1>{symbol} <span style="font-size:1.1rem; color:var(--muted); font-weight:400;">{name}</span></h1><div class="subtitle">完整走勢與歷史數據</div></div>
+        <div>
+            <h1>{symbol} <span style="font-size:1.1rem; color:var(--muted); font-weight:400;">{name}</span></h1>
+            <div class="subtitle">完整走勢、成交量與自動分析</div>
+        </div>
         {price_html}
     </div>
+
+    <div class="section-title">不同時間報酬率</div>
+    {perf_html}
+
     <div class="chart-container">
         <div class="period-btns">
-            <button class="period-btn active" data-period="5d">5日</button>
-            <button class="period-btn" data-period="1mo">1個月</button>
+            <button class="period-btn" data-period="5d">5日</button>
+            <button class="period-btn active" data-period="1mo">1個月</button>
             <button class="period-btn" data-period="3mo">3個月</button>
             <button class="period-btn" data-period="6mo">6個月</button>
             <button class="period-btn" data-period="1y">1年</button>
             <button class="period-btn" data-period="2y">2年</button>
         </div>
-        <canvas id="priceChart" height="120"></canvas>
+        <canvas id="priceChart" height="100"></canvas>
+        <canvas id="volumeChart" height="40" style="margin-top:12px;"></canvas>
     </div>
+
+    <div class="summary-box">
+        <h3>📊 近期走勢總結</h3>
+        <p>{analysis["recent_summary"]}</p>
+        
+        <h3 style="margin-top:18px;">可能造成此走勢的原因</h3>
+        <ul>{reasons_html}</ul>
+        
+        <h3 style="margin-top:18px;">短期展望（約 1 天 ～ 1 週）</h3>
+        <ul>{short_html}</ul>
+        
+        <h3 style="margin-top:18px;">長期展望（約一季 ～ 一年）</h3>
+        <ul>{long_html}</ul>
+        
+        <p style="margin-top:16px; font-size:0.85rem; color:var(--muted);">
+            ※ 以上分析根據歷史價格表現與常見市場邏輯自動產生，僅供參考，不構成投資建議。實際走勢仍受新聞、財報、宏觀環境等多重因素影響。
+        </p>
+    </div>
+
     <div class="section-title">歷史數據表（最近資料）</div>
     <div id="data-table-container" class="loading">載入中...</div>
     """
 
     extra_js = f"""
     const symbol = "{symbol}";
-    let chart = null;
+    let priceChart = null;
+    let volumeChart = null;
+
     async function loadChart(period) {{
         document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
         document.querySelector(`[data-period="${{period}}"]`).classList.add('active');
+
         const res = await fetch(`/api/history/${{symbol}}?period=${{period}}`);
         const data = await res.json();
+
         const labels = data.map(d => d.date);
         const closes = data.map(d => d.close);
-        if (chart) chart.destroy();
-        const ctx = document.getElementById('priceChart').getContext('2d');
-        chart = new Chart(ctx, {{
+        const volumes = data.map(d => d.volume);
+        const opens = data.map(d => d.open);
+        const highs = data.map(d => d.high);
+        const lows = data.map(d => d.low);
+
+        if (priceChart) priceChart.destroy();
+        if (volumeChart) volumeChart.destroy();
+
+        const ctx1 = document.getElementById('priceChart').getContext('2d');
+        priceChart = new Chart(ctx1, {{
             type: 'line',
-            data: {{ labels: labels, datasets: [{{ label: '收盤價', data: closes, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', fill: true, tension: 0.1, pointRadius: 0 }}] }},
-            options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 8 }}, grid: {{ color: '#334155' }} }}, y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }} }} }}
+            data: {{
+                labels: labels,
+                datasets: [{{
+                    label: '收盤價',
+                    data: closes,
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    fill: true,
+                    tension: 0.1,
+                    pointRadius: 0,
+                    pointHoverRadius: 5
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                interaction: {{ mode: 'index', intersect: false }},
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            title: (items) => items[0].label,
+                            label: (item) => {{
+                                const i = item.dataIndex;
+                                return [
+                                    `收盤: ${{closes[i]}}`,
+                                    `開盤: ${{opens[i]}}`,
+                                    `最高: ${{highs[i]}}`,
+                                    `最低: ${{lows[i]}}`,
+                                    `成交量: ${{volumes[i].toLocaleString()}}`
+                                ];
+                            }}
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 8 }}, grid: {{ color: '#334155' }} }},
+                    y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }}
+                }}
+            }}
         }});
+
+        const ctx2 = document.getElementById('volumeChart').getContext('2d');
+        volumeChart = new Chart(ctx2, {{
+            type: 'bar',
+            data: {{
+                labels: labels,
+                datasets: [{{
+                    label: '成交量',
+                    data: volumes,
+                    backgroundColor: 'rgba(148, 163, 184, 0.5)',
+                    borderColor: 'rgba(148, 163, 184, 0.8)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{ legend: {{ display: false }} }},
+                scales: {{
+                    x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 8 }}, grid: {{ display: false }} }},
+                    y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }}
+                }}
+            }}
+        }});
+
         let table = '<table class="data-table"><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th><th>成交量</th></tr></thead><tbody>';
-        const recent = data.slice(-15).reverse();
-        for (const d of recent) {{ table += `<tr><td>${{d.date}}</td><td>${{d.open}}</td><td>${{d.high}}</td><td>${{d.low}}</td><td>${{d.close}}</td><td>${{d.volume.toLocaleString()}}</td></tr>`; }}
+        const recent = data.slice(-20).reverse();
+        for (const d of recent) {{
+            table += `<tr>
+                <td>${{d.date}}</td>
+                <td>${{d.open}}</td>
+                <td>${{d.high}}</td>
+                <td>${{d.low}}</td>
+                <td>${{d.close}}</td>
+                <td>${{d.volume.toLocaleString()}}</td>
+            </tr>`;
+        }}
         table += '</tbody></table>';
         document.getElementById('data-table-container').innerHTML = table;
     }}
-    document.querySelectorAll('.period-btn').forEach(btn => {{ btn.addEventListener('click', () => loadChart(btn.dataset.period)); }});
+
+    document.querySelectorAll('.period-btn').forEach(btn => {{
+        btn.addEventListener('click', () => loadChart(btn.dataset.period));
+    }});
+
     loadChart('1mo');
     """
     return render_page(f"{symbol} 詳情", "stocks-us" if not is_hk else "stocks-hk", content, extra_js)
@@ -531,15 +770,9 @@ def about():
     </ul>
     <div class="section-title">分析說明</div>
     <p style="color:var(--muted); line-height:1.7; margin-bottom:12px;">
-        每則新聞都會提供「重點整合」、「正面角度」、「風險/負面角度」以及「可能對市場的影響」。
-        分析是根據新聞標題、情緒分數與常見市場邏輯自動產生，僅供參考，不構成投資建議。
+        個股頁面會自動計算不同時間報酬率，並根據價格表現產生近期走勢總結、可能原因、短期與長期展望。
+        新聞頁面則提供正反角度與可能影響。所有分析僅供參考，不構成投資建議。
     </p>
-    <div class="section-title">注意事項</div>
-    <ul style="margin-left:20px; color:var(--muted); line-height:1.8;">
-        <li>本站資料有短時間快取，可能與即時行情有數分鐘落差。</li>
-        <li>新聞來源來自公開彙整，無法完全保證每則都來自「完全中立」的媒體。</li>
-        <li>投資有風險，請自行判斷並承擔責任。</li>
-    </ul>
     """
     return render_page("關於", "about", content)
 
