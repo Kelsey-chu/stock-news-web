@@ -62,23 +62,23 @@ HK_WATCHLIST = {
 COMPETITORS = {
     "NVDA": ["AMD", "AVGO", "TSM", "INTC", "ASML"],
     "AMD": ["NVDA", "INTC", "AVGO", "TSM"],
-    "TSM": ["NVDA", "ASML", "INTC", "AMAT"],
+    "TSM": ["NVDA", "ASML", "INTC", "AMAT", "Samsung"],
     "AAPL": ["MSFT", "GOOGL", "AMZN", "META"],
-    "MSFT": ["AAPL", "GOOGL", "AMZN"],
+    "MSFT": ["AAPL", "GOOGL", "AMZN", "ORCL"],
     "GOOGL": ["MSFT", "AAPL", "META", "AMZN"],
-    "AMZN": ["AAPL", "MSFT", "GOOGL"],
-    "META": ["GOOGL"],
-    "TSLA": ["RIVN", "NIO"],
-    "AVGO": ["NVDA", "QCOM", "TXN"],
+    "AMZN": ["AAPL", "MSFT", "GOOGL", "WMT"],
+    "META": ["GOOGL", "SNAP", "PINS"],
+    "TSLA": ["GM", "F", "RIVN", "NIO"],
+    "AVGO": ["NVDA", "QCOM", "TXN", "MRVL"],
     "ASML": ["AMAT", "LRCX", "KLAC"],
     "INTC": ["AMD", "NVDA", "TSM"],
-    "QCOM": ["AVGO", "TXN"],
+    "QCOM": ["AVGO", "TXN", "MRVL"],
     "MU": ["WDC", "STX"],
-    "PLTR": ["SNOW", "DDOG"],
-    "0700.HK": ["9988.HK", "9618.HK"],
-    "9988.HK": ["0700.HK", "9618.HK"],
+    "PLTR": ["SNOW", "DDOG", "MDB"],
+    "0700.HK": ["9988.HK", "BABA", "JD", "PDD"],
+    "9988.HK": ["0700.HK", "JD", "PDD", "AMZN"],
     "3690.HK": ["0700.HK", "9988.HK"],
-    "1810.HK": ["AAPL"],
+    "1810.HK": ["AAPL", "SSNLF"],
 }
 
 HOURS_BACK = 72
@@ -115,9 +115,50 @@ def get_stock_price(symbol):
         return {"symbol": symbol, "error": str(e)}
 
 def get_company_info(symbol):
+    """取得公司基本面（資料最終來自公司向監管機構申報的正式財報）"""
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.info or {}
+
+        quarterly = []
+        try:
+            qf = ticker.quarterly_financials
+            if qf is not None and not qf.empty:
+                cols = list(qf.columns)[:4]
+                for col in cols:
+                    date_str = col.strftime("%Y-%m-%d") if hasattr(col, "strftime") else str(col)[:10]
+                    rev = None
+                    net = None
+                    for key in qf.index:
+                        k = str(key).lower()
+                        if "total revenue" in k or k == "revenue":
+                            try:
+                                rev = float(qf.loc[key, col])
+                            except Exception:
+                                pass
+                        if "net income" in k:
+                            try:
+                                net = float(qf.loc[key, col])
+                            except Exception:
+                                pass
+                    quarterly.append({
+                        "date": date_str,
+                        "revenue": rev,
+                        "net_income": net
+                    })
+        except Exception as e:
+            logger.warning(f"季報資料 {symbol}: {e}")
+
+        is_hk = symbol.endswith(".HK")
+        if is_hk:
+            code = symbol.replace(".HK", "")
+            official_url = f"https://www.hkexnews.hk/search/titlesearch.xhtml?lang=zh"
+            official_label = "港交所披露易（官方公告）"
+        else:
+            official_url = f"https://www.sec.gov/edgar/search/#/category=custom&entityName={symbol}"
+            official_label = "SEC EDGAR（美國證交會正式財報）"
+
+        website = info.get("website") or ""
         return {
             "longName": info.get("longName") or info.get("shortName") or symbol,
             "sector": info.get("sector", "—"),
@@ -135,7 +176,11 @@ def get_company_info(symbol):
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
             "recommendation": info.get("recommendationKey"),
             "targetMeanPrice": info.get("targetMeanPrice"),
-            "currency": info.get("currency", "USD")
+            "currency": info.get("currency", "USD"),
+            "quarterly": quarterly,
+            "official_url": official_url,
+            "official_label": official_label,
+            "website": website
         }
     except Exception as e:
         logger.error(f"公司資料錯誤 {symbol}: {e}")
@@ -205,13 +250,16 @@ def get_performance(symbol):
         logger.error(f"績效計算錯誤 {symbol}: {e}")
     return result
 
-def generate_stock_analysis(symbol, name, performance):
+def generate_stock_analysis(symbol, name, performance, news_list=None):
+    """結合價格走勢 + 近期新聞，產生更詳細的走勢解釋"""
     p = performance or {}
+    news_list = news_list or []
     r1d = p.get("1d")
     r1w = p.get("1w")
     r1mo = p.get("1mo")
     r1y = p.get("1y")
 
+    # ===== 1. 近期走勢描述 =====
     recent_parts = []
     if r1d is not None:
         if r1d > 2: recent_parts.append(f"近1日大漲 {r1d}%")
@@ -223,6 +271,7 @@ def generate_stock_analysis(symbol, name, performance):
     if r1w is not None:
         if r1w > 5: recent_parts.append(f"近1週累積上漲 {r1w}%，短期動能偏強")
         elif r1w < -5: recent_parts.append(f"近1週累積下跌 {r1w}%，短期出現調整")
+        elif abs(r1w) <= 2: recent_parts.append(f"近1週波動不大（{r1w}%）")
 
     if r1mo is not None:
         if r1mo > 10: recent_parts.append(f"近1個月大漲 {r1mo}%，中期趨勢偏多")
@@ -230,34 +279,121 @@ def generate_stock_analysis(symbol, name, performance):
 
     recent_summary = "；".join(recent_parts) if recent_parts else "近期波動相對有限。"
 
-    reasons = []
-    if r1mo is not None and r1mo > 8:
-        reasons.append("中期漲幅較大，可能受到產業利多、財報優於預期或資金流入科技/半導體類股帶動。")
-    if r1mo is not None and r1mo < -8:
-        reasons.append("中期跌幅較大，可能受到獲利了結、大盤回檔、利率或宏觀疑慮影響。")
-    if r1w is not None and abs(r1w) > 4:
-        reasons.append("近一週波動放大，通常與特定新聞、分析師評級變動或整體市場情緒有關。")
-    if not reasons:
-        reasons.append("目前走勢相對平穩，主要受大盤與產業資金流向影響。")
-    reasons.append("成交量若明顯放大，通常代表該段漲跌有較真實的資金參與。")
+    # ===== 2. 從新聞提取情緒與主題 =====
+    bullish_news = []
+    bearish_news = []
+    neutral_news = []
+    themes = set()
 
-    short_term = []
-    if r1d is not None and r1d > 1.5 and r1w is not None and r1w > 3:
-        short_term.append("短期動能偏強，若無突發利空，未來數日仍有機會延續偏多走勢。")
-    elif r1d is not None and r1d < -1.5 and r1w is not None and r1w < -3:
-        short_term.append("短期出現較明顯賣壓，未來一週需留意是否繼續調整或出現反彈。")
+    for n in news_list:
+        a = n.get("analysis", {})
+        score = a.get("score", 0)
+        label = a.get("label", "neutral")
+        title = n.get("title", "")
+        url = n.get("url", "#")
+
+        item = {"title": title, "url": url, "score": score}
+
+        if label == "positive" or score > 0.25:
+            bullish_news.append(item)
+        elif label == "negative" or score < -0.25:
+            bearish_news.append(item)
+        else:
+            neutral_news.append(item)
+
+        t = title.lower()
+        if any(k in t for k in ["earnings", "revenue", "財報", "營收", "獲利", "profit"]):
+            themes.add("財報/營收")
+        if any(k in t for k in ["upgrade", "downgrade", "rating", "目標價", "評級", "price target"]):
+            themes.add("分析師評級")
+        if any(k in t for k in ["ai", "chip", "semiconductor", "gpu", "半導體", "輝達", "nvidia", "hbm"]):
+            themes.add("AI/半導體")
+        if any(k in t for k in ["guidance", "outlook", "展望", "預估", "forecast"]):
+            themes.add("未來展望")
+        if any(k in t for k in ["buyback", "dividend", "回購", "股息"]):
+            themes.add("回購/股息")
+        if any(k in t for k in ["lawsuit", "probe", "investigation", "監管", "訴訟"]):
+            themes.add("監管/訴訟風險")
+
+    # ===== 3. 用新聞交叉解釋走勢原因（詳細版） =====
+    reasons = []
+
+    # 價格方向
+    price_up = (r1d is not None and r1d > 1) or (r1w is not None and r1w > 3)
+    price_down = (r1d is not None and r1d < -1) or (r1w is not None and r1w < -3)
+
+    if price_up:
+        reasons.append(f"【價格表現】近期股價偏強（近1日 {r1d if r1d is not None else '—'}%，近1週 {r1w if r1w is not None else '—'}%）。")
+        if bullish_news:
+            reasons.append("【新聞交叉】近期偏多新聞較多，可能是支撐股價上漲的重要原因：")
+            for i, bn in enumerate(bullish_news[:3], 1):
+                reasons.append(f"　{i}. 「{bn['title']}」（情緒分數 {bn['score']:+.2f}）")
+            reasons.append("這些正面消息可能吸引買盤，或讓市場重新評估公司前景。")
+        if bearish_news:
+            reasons.append("【需注意】同時也有偏空新聞出現，顯示上漲並非毫無雜音：")
+            for i, bn in enumerate(bearish_news[:2], 1):
+                reasons.append(f"　{i}. 「{bn['title']}」")
+            reasons.append("若後續負面消息發酵，短線可能出現獲利了結。")
+        if not bullish_news and not bearish_news:
+            reasons.append("【新聞交叉】近期沒有特別強烈的正面或負面新聞，上漲可能更多來自大盤或產業資金流向。")
+
+    elif price_down:
+        reasons.append(f"【價格表現】近期股價偏弱（近1日 {r1d if r1d is not None else '—'}%，近1週 {r1w if r1w is not None else '—'}%）。")
+        if bearish_news:
+            reasons.append("【新聞交叉】近期偏空新聞較多，可能是造成股價下跌的主要因素：")
+            for i, bn in enumerate(bearish_news[:3], 1):
+                reasons.append(f"　{i}. 「{bn['title']}」（情緒分數 {bn['score']:+.2f}）")
+            reasons.append("負面消息容易引發賣壓或避險情緒，尤其在成交量放大時影響更明顯。")
+        if bullish_news:
+            reasons.append("【需注意】雖然股價下跌，但仍有部分偏多新聞：")
+            for i, bn in enumerate(bullish_news[:2], 1):
+                reasons.append(f"　{i}. 「{bn['title']}」")
+            reasons.append("若這些正面因素後續被市場重新重視，可能出現技術性反彈。")
+        if not bullish_news and not bearish_news:
+            reasons.append("【新聞交叉】近期新聞情緒不明顯，下跌可能更多來自大盤回檔、獲利了結或資金輪動。")
+
     else:
-        short_term.append("短期方向較不明顯，可能以震盪為主，建議觀察能否站穩近期低點或突破前高。")
-    short_term.append("重點觀察：成交量是否配合、是否有重要新聞或財報公布。")
+        reasons.append("【價格表現】近期股價波動相對有限，方向尚未明確。")
+        if bullish_news or bearish_news:
+            reasons.append("【新聞交叉】雖然價格震盪，但新聞面並非完全平靜：")
+            if bullish_news:
+                reasons.append(f"　正面消息例如：「{bullish_news[0]['title']}」")
+            if bearish_news:
+                reasons.append(f"　負面消息例如：「{bearish_news[0]['title']}」")
+            reasons.append("多空消息並存，可能是造成股價上不來、下不去的原因之一。")
+        else:
+            reasons.append("【新聞交叉】近期相關新聞不多或情緒中性，市場觀望氣氛濃厚。")
+
+    # 主題補充
+    if themes:
+        reasons.append(f"【主要新聞主題】目前市場較關注：{'、'.join(themes)}。這些主題的後續發展，將持續影響短線走勢。")
+
+    reasons.append("【綜合建議】單一新聞不應作為進出唯一依據，建議搭配成交量、大盤氣氛與公司基本面一起判斷。")
+
+    # ===== 4. 短長期展望（略作調整，更貼近新聞） =====
+    short_term = []
+    if price_up and bullish_news and not bearish_news:
+        short_term.append("新聞面偏多且股價同步走強，短期動能仍有機會延續，但需留意是否已反應過度。")
+    elif price_down and bearish_news and not bullish_news:
+        short_term.append("新聞面偏空且股價同步走弱，短期仍有壓力，可觀察是否出現止跌訊號或利空出盡。")
+    elif price_up and bearish_news:
+        short_term.append("股價上漲但存在負面新聞，短期可能震盪加大，建議觀察能否消化利空。")
+    elif price_down and bullish_news:
+        short_term.append("股價下跌但有正面新聞支撐，短期或有反彈機會，需確認買盤是否真正進場。")
+    else:
+        short_term.append("目前多空消息與價格表現較為糾結，短期可能以震盪為主。")
+    short_term.append("重點觀察：後續是否有重要財報、分析師報告或產業新聞出現。")
 
     long_term = []
     if r1y is not None and r1y > 30:
-        long_term.append("過去一年漲幅顯著，長期趨勢仍偏多，但需留意估值是否已偏高。")
+        long_term.append("過去一年漲幅顯著，長期趨勢仍偏多，但需留意估值與獲利了結壓力。")
     elif r1y is not None and r1y < -20:
         long_term.append("過去一年表現偏弱，若基本面未明顯惡化，長期有機會出現價值修復。")
     else:
-        long_term.append("長期表現大致中性，未來走向將主要取決於公司基本面、產業周期與總體經濟環境。")
-    long_term.append("建議搭配公司財報、產業新聞與大盤趨勢一起判斷。")
+        long_term.append("長期表現大致中性，未來仍取決於公司基本面、產業周期與總體經濟。")
+    if themes:
+        long_term.append(f"目前新聞反覆提到「{'、'.join(list(themes)[:3])}」，這些因素的長期演變，將是影響未來一年到一年走勢的重要變數。")
+    long_term.append("建議持續追蹤財報、競爭對手動態與產業資本支出變化。")
 
     return {
         "recent_summary": recent_summary,
@@ -390,6 +526,7 @@ def get_stock_news(symbol, limit=5):
     return result
 
 def cross_compare_news(news_list):
+    """對多則新聞做交叉對比摘要"""
     if not news_list:
         return {
             "summary": "目前沒有足夠新聞可進行交叉對比。",
@@ -425,7 +562,7 @@ def cross_compare_news(news_list):
         if any(k in title for k in ["guidance", "outlook", "展望", "預估"]):
             themes.append("未來展望")
 
-    themes = list(dict.fromkeys(themes))[:4]
+    themes = list(dict.fromkeys(themes))[:4]  # 去重並限制數量
 
     total = len(news_list)
     if bullish > bearish and bullish >= total * 0.4:
@@ -750,9 +887,23 @@ def stock_detail(symbol):
     curr = "HK$" if is_hk else "$"
 
     performance = get_performance(symbol)
-    analysis = generate_stock_analysis(symbol, name, performance)
+    stock_news = get_stock_news(symbol, limit=6)
+    analysis = generate_stock_analysis(symbol, name, performance, news_list=stock_news)
     company = get_company_info(symbol)
-    stock_news = get_stock_news(symbol, limit=5)
+
+    # 最近幾季財報表格
+    quarterly_html = ""
+    qlist = company.get("quarterly") or []
+    if qlist:
+        quarterly_html = '<div class="section-title" style="margin-top:8px;">最近幾季營收 / 淨利（來自正式財報）</div>'
+        quarterly_html += '<table class="data-table"><thead><tr><th>報告期</th><th>營收</th><th>淨利</th></tr></thead><tbody>'
+        for q in qlist:
+            quarterly_html += f"<tr><td>{q.get('date','—')}</td><td>{format_number(q.get('revenue'))}</td><td>{format_number(q.get('net_income'))}</td></tr>"
+        quarterly_html += '</tbody></table>'
+    else:
+        quarterly_html = '<p style="color:var(--muted); font-size:0.9rem; margin-bottom:16px;">此股票暫無完整季報彙整資料，請點上方官方連結查看原始財報。</p>'
+
+    
     cross = cross_compare_news(stock_news)
 
     # 競爭公司新聞
@@ -785,20 +936,31 @@ def stock_detail(symbol):
             </div>
         </div>'''
 
+    # 公司基本面
     info_html = f"""
+    <div class="summary-box" style="margin-bottom:16px;">
+        <p style="font-size:0.9rem; color:var(--muted); margin-bottom:10px;">
+            以下數字整理自公司向監管機構申報的正式財報（美股：SEC 10-K / 10-Q；港股：聯交所公告），
+            經 Yahoo Finance 彙整後顯示。建議以官方原始文件為最終依據。
+        </p>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            <a class="link-btn" href="{company.get('official_url', '#')}" target="_blank" rel="noopener">📄 {company.get('official_label', '官方財報')}</a>
+            {"<a class='link-btn' href='" + company.get('website') + "' target='_blank' rel='noopener'>🏢 公司官網</a>" if company.get("website") else ""}
+        </div>
+    </div>
     <div class="info-grid">
         <div class="info-item"><div class="label">產業</div><div class="value">{company.get("sector","—")}</div></div>
         <div class="info-item"><div class="label">市值</div><div class="value">{format_number(company.get("marketCap"))}</div></div>
-        <div class="info-item"><div class="label">營收</div><div class="value">{format_number(company.get("revenue"))}</div></div>
+        <div class="info-item"><div class="label">營收（最新年報/季報）</div><div class="value">{format_number(company.get("revenue"))}</div></div>
         <div class="info-item"><div class="label">營收成長</div><div class="value">{(str(round(company.get("revenueGrowth")*100,1))+"%") if company.get("revenueGrowth") else "—"}</div></div>
         <div class="info-item"><div class="label">本益比 (TTM)</div><div class="value">{round(company.get("trailingPE"),2) if company.get("trailingPE") else "—"}</div></div>
         <div class="info-item"><div class="label">前瞻本益比</div><div class="value">{round(company.get("forwardPE"),2) if company.get("forwardPE") else "—"}</div></div>
         <div class="info-item"><div class="label">EPS</div><div class="value">{round(company.get("eps"),2) if company.get("eps") else "—"}</div></div>
         <div class="info-item"><div class="label">毛利率</div><div class="value">{(str(round(company.get("grossMargins")*100,1))+"%") if company.get("grossMargins") else "—"}</div></div>
+        <div class="info-item"><div class="label">淨利率</div><div class="value">{(str(round(company.get("profitMargins")*100,1))+"%") if company.get("profitMargins") else "—"}</div></div>
         <div class="info-item"><div class="label">52週高</div><div class="value">{company.get("fiftyTwoWeekHigh") or "—"}</div></div>
         <div class="info-item"><div class="label">52週低</div><div class="value">{company.get("fiftyTwoWeekLow") or "—"}</div></div>
         <div class="info-item"><div class="label">分析師目標價</div><div class="value">{company.get("targetMeanPrice") or "—"}</div></div>
-        <div class="info-item"><div class="label">建議</div><div class="value">{company.get("recommendation") or "—"}</div></div>
     </div>
     """
 
@@ -816,6 +978,7 @@ def stock_detail(symbol):
     short_html = "".join([f"<li>{s}</li>" for s in analysis["short_term"]])
     long_html = "".join([f"<li>{l}</li>" for l in analysis["long_term"]])
 
+    # 新聞交叉對比
     cross_html = f"""
     <div class="summary-box">
         <h3>🔍 新聞交叉對比摘要</h3>
@@ -827,6 +990,7 @@ def stock_detail(symbol):
     </div>
     """
 
+    # 個股新聞
     news_html = ""
     if not stock_news:
         news_html = '<div class="loading">目前沒有找到相關近期新聞</div>'
@@ -866,6 +1030,7 @@ def stock_detail(symbol):
 
     <div class="section-title">公司基本面與營收</div>
     {info_html}
+    {quarterly_html}
 
     <div class="section-title">不同時間報酬率</div>
     {perf_html}
