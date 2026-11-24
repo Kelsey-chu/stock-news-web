@@ -1,7 +1,3 @@
-services:
-  - type: web
-    name: stock-news-hk-us
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
-    plan: free
+flask
+yfinance
+gunicorn
