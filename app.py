@@ -332,6 +332,39 @@ def get_performance(symbol):
         logger.error(f"績效計算錯誤 {symbol}: {e}")
     return result
 
+
+def get_competitor_performance(symbol):
+    """同業競爭對手表現：股價漲跌與多時間報酬率對比"""
+    comps = COMPETITORS.get(symbol, [])[:5]
+    symbols = [symbol] + [c for c in comps if c != symbol]
+    rows = []
+    for sym in symbols:
+        try:
+            price = get_stock_price(sym)
+            perf = get_performance(sym)
+            name = US_WATCHLIST.get(sym) or HK_WATCHLIST.get(sym) or sym
+            if "error" in price:
+                rows.append({"symbol": sym, "name": name, "is_self": sym == symbol, "error": True})
+            else:
+                rows.append({
+                    "symbol": sym,
+                    "name": name,
+                    "is_self": sym == symbol,
+                    "price": price.get("price"),
+                    "change_pct": price.get("change_pct"),
+                    "currency": price.get("currency", "USD"),
+                    "r1w": perf.get("1w"),
+                    "r1mo": perf.get("1mo"),
+                    "r3mo": perf.get("3mo"),
+                    "r1y": perf.get("1y"),
+                    "error": False,
+                })
+            time.sleep(0.08)
+        except Exception as e:
+            logger.warning("競爭對手資料 %s: %s", sym, e)
+    return rows
+
+
 def generate_stock_analysis(symbol, name, performance, news_list=None):
     """結合價格走勢 + 近期新聞，產生更詳細的走勢解釋（含新聞連結）"""
     p = performance or {}
@@ -844,26 +877,33 @@ table.data-table td:first-child, table.data-table th:first-child { text-align: l
 }
 """
 
-def render_page(title, page, content, extra_js=""):
+def render_page(title, page, content, extra_js="", auto_refresh=False):
+    refresh_meta = '<meta http-equiv="refresh" content="180">' if auto_refresh else ""
+    refresh_note = (
+        '<div style="font-size:0.8rem;color:var(--muted);margin-bottom:12px;">'
+        '⏱ 本頁約每 3 分鐘自動重新整理以更新行情（亦可手動重新整理）</div>'
+        if auto_refresh else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {refresh_meta}
     <title>{title} | 美股・港股分析</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>{BASE_STYLE}</style>
 </head>
 <body>
     {SIDEBAR}
-    <div class="main">{content}</div>
+    <div class="main">{refresh_note}{content}</div>
     <script>{extra_js}</script>
 </body>
 </html>"""
 
 @app.route("/")
 def home():
-    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:11]
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")
     data = get_dashboard_data(cache_key)
     price_info = data["price_info"]
 
@@ -908,7 +948,7 @@ def home():
     <div class="section-title">美股</div><div class="price-grid">{us_cards}</div>
     <div class="section-title">港股</div><div class="price-grid">{hk_cards}</div>
     """
-    return render_page("總覽", "home", content)
+    return render_page("總覽", "home", content, auto_refresh=True)
 
 @app.route("/daily-closes")
 def daily_closes():
@@ -943,7 +983,7 @@ def daily_closes():
 
 @app.route("/stocks/us")
 def stocks_us():
-    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:11]
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")
     data = get_dashboard_data(cache_key)
     price_info = data["price_info"]
     cards = ""
@@ -959,7 +999,7 @@ def stocks_us():
 
 @app.route("/stocks/hk")
 def stocks_hk():
-    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:11]
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")
     data = get_dashboard_data(cache_key)
     price_info = data["price_info"]
     cards = ""
@@ -999,6 +1039,47 @@ def stock_detail(symbol):
             f'開 {curr}{price["open"]} ｜ 高 {curr}{price["high"]} ｜ 低 {curr}{price["low"]} ｜ 量 {price["volume"]:,}'
             f'</div></div>'
         )
+
+    # 同業競爭對手表現對比
+    comp_rows = get_competitor_performance(symbol)
+    competitor_perf_html = ""
+    if comp_rows and len(comp_rows) > 1:
+        parts = []
+        parts.append('<table class="data-table"><thead><tr><th>代號</th><th>名稱</th><th>現價</th><th>今日漲跌</th><th>1週</th><th>1月</th><th>3月</th><th>1年</th></tr></thead><tbody>')
+        for row in comp_rows:
+            if row.get("error"):
+                parts.append(
+                    f'<tr><td><a href="/stock/{row["symbol"]}" style="color:var(--accent);">{row["symbol"]}</a></td>'
+                    f'<td>{row["name"]}</td><td colspan="6">無資料</td></tr>'
+                )
+                continue
+            chg = row.get("change_pct") or 0
+            cls = "up" if chg > 0 else ("down" if chg < 0 else "flat")
+            curr_sym = "HK$" if row.get("currency") == "HKD" else "$"
+            self_mark = ' <span style="color:#eab308;font-size:0.75rem;">本股</span>' if row.get("is_self") else ""
+
+            def _pct(v):
+                if v is None:
+                    return "—"
+                c = "up" if v > 0 else ("down" if v < 0 else "flat")
+                return f'<span class="{c}">{v:+.2f}%</span>'
+
+            parts.append(
+                f'<tr><td><a href="/stock/{row["symbol"]}" style="color:var(--accent);">{row["symbol"]}</a>{self_mark}</td>'
+                f'<td>{row["name"]}</td><td>{curr_sym}{row.get("price", "—")}</td>'
+                f'<td class="{cls}">{chg:+.2f}%</td>'
+                f'<td>{_pct(row.get("r1w"))}</td><td>{_pct(row.get("r1mo"))}</td>'
+                f'<td>{_pct(row.get("r3mo"))}</td><td>{_pct(row.get("r1y"))}</td></tr>'
+            )
+        parts.append("</tbody></table>")
+        parts.append(
+            f'<p style="margin-top:10px; font-size:0.85rem; color:var(--muted);">'
+            f'資料來源：Yahoo Finance。可點代號進入該股詳情。'
+            f' <a href="https://finance.yahoo.com/quote/{symbol}" target="_blank" rel="noopener" style="color:#60a5fa;">Yahoo {symbol}</a></p>'
+        )
+        competitor_perf_html = "".join(parts)
+    else:
+        competitor_perf_html = '<p style="color:var(--muted);">此股票尚未設定同業對手帳號，或暫時無法取得對比資料。</p>'
 
     # 競爭公司新聞
     comps = COMPETITORS.get(symbol, [])[:3]
@@ -1170,6 +1251,11 @@ def stock_detail(symbol):
     <div class="section-title">相關新聞分析</div>
     {news_html}
 
+    <div class="section-title">同業競爭對手表現對比</div>
+    <div class="summary-box">
+        {competitor_perf_html}
+    </div>
+
     <div class="section-title">競爭公司近期新聞</div>
     <div class="summary-box">
         {competitor_news_html if competitor_news_html else '<p style="color:var(--muted);">目前沒有找到主要競爭對手的近期新聞，或該股票尚未設定競爭對手帳號。</p>'}
@@ -1219,16 +1305,16 @@ def stock_detail(symbol):
     document.querySelectorAll('.period-btn').forEach(btn => btn.addEventListener('click', () => loadChart(btn.dataset.period)));
     loadChart('1mo');
     """
-    return render_page(f"{symbol} 詳情", "stocks-us" if not is_hk else "stocks-hk", content, extra_js)
+    return render_page(f"{symbol} 詳情", "stocks-us" if not is_hk else "stocks-hk", content, extra_js, auto_refresh=True)
 
 @app.route("/news/us")
 def news_us():
-    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:11]
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")
     return render_news_page("美股新聞", "news-us", get_news_data("US", cache_key))
 
 @app.route("/news/hk")
 def news_hk():
-    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:11]
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")
     return render_news_page("港股新聞", "news-hk", get_news_data("HK", cache_key))
 
 def render_news_page(title, page, data):
@@ -1279,7 +1365,7 @@ def api_history(symbol):
 
 @app.route("/api/dashboard")
 def api_dashboard():
-    return jsonify(get_dashboard_data(datetime.now().strftime("%Y%m%d%H%M")[:11]))
+    return jsonify(get_dashboard_data(datetime.now().strftime("%Y%m%d%H%M")))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
