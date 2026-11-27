@@ -1235,6 +1235,13 @@ def stock_detail(symbol):
             <button type="button" class="period-btn chart-type-btn active" data-chart="candle">日K（K棒）</button>
             <button type="button" class="period-btn chart-type-btn" data-chart="line">折線圖</button>
         </div>
+        <div class="period-btns" style="margin-bottom:14px; gap:6px;">
+            <span style="color:var(--muted); font-size:0.85rem; align-self:center; margin-right:4px;">指標：</span>
+            <button type="button" class="period-btn ind-btn active" data-ind="ma5">MA5</button>
+            <button type="button" class="period-btn ind-btn active" data-ind="ma20">MA20</button>
+            <button type="button" class="period-btn ind-btn active" data-ind="ma60">MA60</button>
+            <button type="button" class="period-btn ind-btn" data-ind="bb">布林通道</button>
+        </div>
         <div id="klineChart" style="width:100%; height:380px;"></div>
         <p style="font-size:0.8rem; color:var(--muted); margin-top:8px;">滑鼠移上可看開高低收；滾輪可縮放，拖曳可平移。預設為日K線。</p>
     </div>
@@ -1275,9 +1282,49 @@ def stock_detail(symbol):
     let candleSeries = null;
     let lineSeries = null;
     let volumeSeries = null;
+    let ma5Series = null, ma20Series = null, ma60Series = null;
+    let bbUpper = null, bbMid = null, bbLower = null;
     let currentPeriod = "1mo";
     let currentType = "candle";
     let lastData = [];
+    const indOn = {{ ma5: true, ma20: true, ma60: true, bb: false }};
+
+    function sma(values, period) {{
+        const out = [];
+        for (let i = 0; i < values.length; i++) {{
+            if (i + 1 < period) {{ out.push(null); continue; }}
+            let sum = 0;
+            for (let j = i - period + 1; j <= i; j++) sum += values[j];
+            out.push(sum / period);
+        }}
+        return out;
+    }}
+
+    function bollinger(values, period, mult) {{
+        const mid = sma(values, period);
+        const upper = [], lower = [];
+        for (let i = 0; i < values.length; i++) {{
+            if (mid[i] == null) {{ upper.push(null); lower.push(null); continue; }}
+            let sum = 0;
+            for (let j = i - period + 1; j <= i; j++) {{
+                const d = values[j] - mid[i];
+                sum += d * d;
+            }}
+            const std = Math.sqrt(sum / period);
+            upper.push(mid[i] + mult * std);
+            lower.push(mid[i] - mult * std);
+        }}
+        return {{ mid, upper, lower }};
+    }}
+
+    function toLineData(dates, values) {{
+        const out = [];
+        for (let i = 0; i < dates.length; i++) {{
+            if (values[i] == null) continue;
+            out.push({{ time: dates[i], value: +values[i].toFixed(4) }});
+        }}
+        return out;
+    }}
 
     function ensureChart() {{
         if (chart) return;
@@ -1296,44 +1343,58 @@ def stock_detail(symbol):
             timeScale: {{ borderColor: "#334155", timeVisible: true }}
         }});
         candleSeries = chart.addCandlestickSeries({{
-            upColor: "#22c55e",
-            downColor: "#ef4444",
-            borderUpColor: "#22c55e",
-            borderDownColor: "#ef4444",
-            wickUpColor: "#22c55e",
-            wickDownColor: "#ef4444"
+            upColor: "#22c55e", downColor: "#ef4444",
+            borderUpColor: "#22c55e", borderDownColor: "#ef4444",
+            wickUpColor: "#22c55e", wickDownColor: "#ef4444"
         }});
-        lineSeries = chart.addLineSeries({{
-            color: "#3b82f6",
-            lineWidth: 2,
-            visible: false
-        }});
+        lineSeries = chart.addLineSeries({{ color: "#3b82f6", lineWidth: 2, visible: false }});
+        ma5Series = chart.addLineSeries({{ color: "#fbbf24", lineWidth: 1.5, title: "MA5" }});
+        ma20Series = chart.addLineSeries({{ color: "#a78bfa", lineWidth: 1.5, title: "MA20" }});
+        ma60Series = chart.addLineSeries({{ color: "#38bdf8", lineWidth: 1.5, title: "MA60" }});
+        bbUpper = chart.addLineSeries({{ color: "rgba(148,163,184,0.7)", lineWidth: 1, lineStyle: 2, title: "BB上" }});
+        bbMid = chart.addLineSeries({{ color: "rgba(148,163,184,0.5)", lineWidth: 1, title: "BB中" }});
+        bbLower = chart.addLineSeries({{ color: "rgba(148,163,184,0.7)", lineWidth: 1, lineStyle: 2, title: "BB下" }});
         volumeSeries = chart.addHistogramSeries({{
             priceFormat: {{ type: "volume" }},
             priceScaleId: "",
-            scaleMargins: {{ top: 0.8, bottom: 0 }}
+            scaleMargins: {{ top: 0.82, bottom: 0 }}
         }});
-        chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.8, bottom: 0 }} }});
-        window.addEventListener("resize", () => {{
-            chart.applyOptions({{ width: el.clientWidth }});
-        }});
+        chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.82, bottom: 0 }} }});
+        window.addEventListener("resize", () => chart.applyOptions({{ width: el.clientWidth }}));
+    }}
+
+    function updateIndicators(data) {{
+        const dates = data.map(d => d.date);
+        const closes = data.map(d => d.close);
+        const m5 = sma(closes, 5);
+        const m20 = sma(closes, 20);
+        const m60 = sma(closes, 60);
+        const bb = bollinger(closes, 20, 2);
+        ma5Series.setData(toLineData(dates, m5));
+        ma20Series.setData(toLineData(dates, m20));
+        ma60Series.setData(toLineData(dates, m60));
+        bbUpper.setData(toLineData(dates, bb.upper));
+        bbMid.setData(toLineData(dates, bb.mid));
+        bbLower.setData(toLineData(dates, bb.lower));
+        ma5Series.applyOptions({{ visible: !!indOn.ma5 }});
+        ma20Series.applyOptions({{ visible: !!indOn.ma20 }});
+        ma60Series.applyOptions({{ visible: !!indOn.ma60 }});
+        bbUpper.applyOptions({{ visible: !!indOn.bb }});
+        bbMid.applyOptions({{ visible: !!indOn.bb }});
+        bbLower.applyOptions({{ visible: !!indOn.bb }});
     }}
 
     function applyData(data, type) {{
         ensureChart();
         lastData = data;
         const candles = data.map(d => ({{
-            time: d.date,
-            open: d.open,
-            high: d.high,
-            low: d.low,
-            close: d.close
+            time: d.date, open: d.open, high: d.high, low: d.low, close: d.close
         }}));
         const line = data.map(d => ({{ time: d.date, value: d.close }}));
         const vols = data.map(d => ({{
             time: d.date,
             value: d.volume,
-            color: d.close >= d.open ? "rgba(34,197,94,0.5)" : "rgba(239,68,68,0.5)"
+            color: d.close >= d.open ? "rgba(34,197,94,0.45)" : "rgba(239,68,68,0.45)"
         }}));
         candleSeries.setData(candles);
         lineSeries.setData(line);
@@ -1345,8 +1406,8 @@ def stock_detail(symbol):
             candleSeries.applyOptions({{ visible: false }});
             lineSeries.applyOptions({{ visible: true }});
         }}
+        updateIndicators(data);
         chart.timeScale().fitContent();
-
         let table = '<table class="data-table"><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th><th>成交量</th></tr></thead><tbody>';
         data.slice(-20).reverse().forEach(d => {{
             table += `<tr><td>${{d.date}}</td><td>${{d.open}}</td><td>${{d.high}}</td><td>${{d.low}}</td><td>${{d.close}}</td><td>${{d.volume.toLocaleString()}}</td></tr>`;
@@ -1377,14 +1438,23 @@ def stock_detail(symbol):
         if (lastData.length) applyData(lastData, type);
     }}
 
+    function toggleInd(key) {{
+        indOn[key] = !indOn[key];
+        const btn = document.querySelector(`[data-ind="${{key}}"]`);
+        if (btn) btn.classList.toggle("active", indOn[key]);
+        if (lastData.length) updateIndicators(lastData);
+    }}
+
     document.querySelectorAll(".period-btn[data-period]").forEach(btn => {{
         btn.addEventListener("click", () => loadChart(btn.dataset.period));
     }});
     document.querySelectorAll(".chart-type-btn").forEach(btn => {{
         btn.addEventListener("click", () => setChartType(btn.dataset.chart));
     }});
+    document.querySelectorAll(".ind-btn").forEach(btn => {{
+        btn.addEventListener("click", () => toggleInd(btn.dataset.ind));
+    }});
 
-    // load lightweight-charts then init
     (function() {{
         const s = document.createElement("script");
         s.src = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js";
