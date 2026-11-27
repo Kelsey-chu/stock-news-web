@@ -1223,7 +1223,7 @@ def stock_detail(symbol):
     {perf_html}
 
     <div class="chart-container">
-        <div class="period-btns">
+        <div class="period-btns" style="margin-bottom:10px;">
             <button class="period-btn" data-period="5d">5日</button>
             <button class="period-btn active" data-period="1mo">1個月</button>
             <button class="period-btn" data-period="3mo">3個月</button>
@@ -1231,8 +1231,12 @@ def stock_detail(symbol):
             <button class="period-btn" data-period="1y">1年</button>
             <button class="period-btn" data-period="2y">2年</button>
         </div>
-        <canvas id="priceChart" height="100"></canvas>
-        <canvas id="volumeChart" height="40" style="margin-top:12px;"></canvas>
+        <div class="period-btns" style="margin-bottom:14px;">
+            <button type="button" class="period-btn chart-type-btn active" data-chart="candle">日K（K棒）</button>
+            <button type="button" class="period-btn chart-type-btn" data-chart="line">折線圖</button>
+        </div>
+        <div id="klineChart" style="width:100%; height:380px;"></div>
+        <p style="font-size:0.8rem; color:var(--muted); margin-top:8px;">滑鼠移上可看開高低收；滾輪可縮放，拖曳可平移。預設為日K線。</p>
     </div>
 
     <div class="summary-box">
@@ -1267,43 +1271,126 @@ def stock_detail(symbol):
 
     extra_js = f"""
     const symbol = "{symbol}";
-    let priceChart = null, volumeChart = null;
+    let chart = null;
+    let candleSeries = null;
+    let lineSeries = null;
+    let volumeSeries = null;
+    let currentPeriod = "1mo";
+    let currentType = "candle";
+    let lastData = [];
+
+    function ensureChart() {{
+        if (chart) return;
+        const el = document.getElementById("klineChart");
+        chart = LightweightCharts.createChart(el, {{
+            layout: {{
+                background: {{ type: "solid", color: "#1e293b" }},
+                textColor: "#94a3b8"
+            }},
+            grid: {{
+                vertLines: {{ color: "#334155" }},
+                horzLines: {{ color: "#334155" }}
+            }},
+            crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+            rightPriceScale: {{ borderColor: "#334155" }},
+            timeScale: {{ borderColor: "#334155", timeVisible: true }}
+        }});
+        candleSeries = chart.addCandlestickSeries({{
+            upColor: "#22c55e",
+            downColor: "#ef4444",
+            borderUpColor: "#22c55e",
+            borderDownColor: "#ef4444",
+            wickUpColor: "#22c55e",
+            wickDownColor: "#ef4444"
+        }});
+        lineSeries = chart.addLineSeries({{
+            color: "#3b82f6",
+            lineWidth: 2,
+            visible: false
+        }});
+        volumeSeries = chart.addHistogramSeries({{
+            priceFormat: {{ type: "volume" }},
+            priceScaleId: "",
+            scaleMargins: {{ top: 0.8, bottom: 0 }}
+        }});
+        chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.8, bottom: 0 }} }});
+        window.addEventListener("resize", () => {{
+            chart.applyOptions({{ width: el.clientWidth }});
+        }});
+    }}
+
+    function applyData(data, type) {{
+        ensureChart();
+        lastData = data;
+        const candles = data.map(d => ({{
+            time: d.date,
+            open: d.open,
+            high: d.high,
+            low: d.low,
+            close: d.close
+        }}));
+        const line = data.map(d => ({{ time: d.date, value: d.close }}));
+        const vols = data.map(d => ({{
+            time: d.date,
+            value: d.volume,
+            color: d.close >= d.open ? "rgba(34,197,94,0.5)" : "rgba(239,68,68,0.5)"
+        }}));
+        candleSeries.setData(candles);
+        lineSeries.setData(line);
+        volumeSeries.setData(vols);
+        if (type === "candle") {{
+            candleSeries.applyOptions({{ visible: true }});
+            lineSeries.applyOptions({{ visible: false }});
+        }} else {{
+            candleSeries.applyOptions({{ visible: false }});
+            lineSeries.applyOptions({{ visible: true }});
+        }}
+        chart.timeScale().fitContent();
+
+        let table = '<table class="data-table"><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th><th>成交量</th></tr></thead><tbody>';
+        data.slice(-20).reverse().forEach(d => {{
+            table += `<tr><td>${{d.date}}</td><td>${{d.open}}</td><td>${{d.high}}</td><td>${{d.low}}</td><td>${{d.close}}</td><td>${{d.volume.toLocaleString()}}</td></tr>`;
+        }});
+        table += "</tbody></table>";
+        document.getElementById("data-table-container").innerHTML = table;
+    }}
+
     async function loadChart(period) {{
-        document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
-        document.querySelector(`[data-period="${{period}}"]`).classList.add('active');
+        currentPeriod = period;
+        document.querySelectorAll(".period-btn[data-period]").forEach(b => b.classList.remove("active"));
+        const pb = document.querySelector(`[data-period="${{period}}"]`);
+        if (pb) pb.classList.add("active");
         const res = await fetch(`/api/history/${{symbol}}?period=${{period}}`);
         const data = await res.json();
-        const labels = data.map(d => d.date);
-        const closes = data.map(d => d.close);
-        const volumes = data.map(d => d.volume);
-        const opens = data.map(d => d.open);
-        const highs = data.map(d => d.high);
-        const lows = data.map(d => d.low);
-        if (priceChart) priceChart.destroy();
-        if (volumeChart) volumeChart.destroy();
-        const ctx1 = document.getElementById('priceChart').getContext('2d');
-        priceChart = new Chart(ctx1, {{
-            type: 'line',
-            data: {{ labels, datasets: [{{ label: '收盤價', data: closes, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.1, pointRadius: 0, pointHoverRadius: 5 }}] }},
-            options: {{
-                responsive: true, interaction: {{ mode: 'index', intersect: false }},
-                plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ title: i => i[0].label, label: item => {{ const i = item.dataIndex; return [`收盤: ${{closes[i]}}`, `開盤: ${{opens[i]}}`, `最高: ${{highs[i]}}`, `最低: ${{lows[i]}}`, `成交量: ${{volumes[i].toLocaleString()}}`]; }} }} }} }},
-                scales: {{ x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 8 }}, grid: {{ color: '#334155' }} }}, y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }} }}
-            }}
-        }});
-        const ctx2 = document.getElementById('volumeChart').getContext('2d');
-        volumeChart = new Chart(ctx2, {{
-            type: 'bar',
-            data: {{ labels, datasets: [{{ label: '成交量', data: volumes, backgroundColor: 'rgba(148,163,184,0.5)' }}] }},
-            options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 8 }}, grid: {{ display: false }} }}, y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }} }} }}
-        }});
-        let table = '<table class="data-table"><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th><th>成交量</th></tr></thead><tbody>';
-        data.slice(-20).reverse().forEach(d => {{ table += `<tr><td>${{d.date}}</td><td>${{d.open}}</td><td>${{d.high}}</td><td>${{d.low}}</td><td>${{d.close}}</td><td>${{d.volume.toLocaleString()}}</td></tr>`; }});
-        table += '</tbody></table>';
-        document.getElementById('data-table-container').innerHTML = table;
+        if (!data || !data.length) {{
+            document.getElementById("data-table-container").innerHTML = '<div class="loading">無歷史資料</div>';
+            return;
+        }}
+        applyData(data, currentType);
     }}
-    document.querySelectorAll('.period-btn').forEach(btn => btn.addEventListener('click', () => loadChart(btn.dataset.period)));
-    loadChart('1mo');
+
+    function setChartType(type) {{
+        currentType = type;
+        document.querySelectorAll(".chart-type-btn").forEach(b => b.classList.remove("active"));
+        const btn = document.querySelector(`[data-chart="${{type}}"]`);
+        if (btn) btn.classList.add("active");
+        if (lastData.length) applyData(lastData, type);
+    }}
+
+    document.querySelectorAll(".period-btn[data-period]").forEach(btn => {{
+        btn.addEventListener("click", () => loadChart(btn.dataset.period));
+    }});
+    document.querySelectorAll(".chart-type-btn").forEach(btn => {{
+        btn.addEventListener("click", () => setChartType(btn.dataset.chart));
+    }});
+
+    // load lightweight-charts then init
+    (function() {{
+        const s = document.createElement("script");
+        s.src = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js";
+        s.onload = () => loadChart("1mo");
+        document.head.appendChild(s);
+    }})();
     """
     return render_page(f"{symbol} 詳情", "stocks-us" if not is_hk else "stocks-hk", content, extra_js, auto_refresh=True)
 
